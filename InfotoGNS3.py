@@ -1,4 +1,6 @@
+from distutils.command import clean
 import json
+from re import S
 import numpy as np
 import networkx as nx
 import matplotlib.pyplot as plt
@@ -266,7 +268,13 @@ CLASS_DICT = {ROUTER: {"compute_id": "local",
                         "x": -382,
                         "y": 26,
                         "z": 1}}
-                  
+
+def clean_string_ip_address(s):
+    sl = s.split('.')
+    sl[-1] = '0'
+    return '.'.join(sl)
+
+
 def set_component_config(comp_id:int, configs:dict):
     if comp_id not in CLASS_DICT:
         return
@@ -327,9 +335,9 @@ def generate_gns3file(name, GNS3dir, nodedicts:dict, adjacency, project_id="0e85
     
     # node_ids, template_ids follow the order.
     coords = node_spacing(nodedicts, adjacency, scene_height, scene_width)
-    print("init", nodedicts)
+    # print("init", nodedicts)
     nodes = generate_nodes(nodedicts, adjacency, coords)
-    print("after generate nodes", len(nodes), "\n\n\n\n\n\n\n")
+    # print("after generate nodes", len(nodes), "\n\n\n\n\n\n\n")
     topology["nodes"] = nodes
     links = generate_links(nodedicts, adjacency, nodes)
     topology["links"] = links
@@ -393,8 +401,6 @@ def generate_links(nodedicts:dict, adjacency, nodes):
         node_id_all_ports[node_id] = {}
         for adp_port in PORTS_LOOKUP[node_type]:
             node_id_all_ports[node_id][adp_port] = 0
-            
-    print(adj_list)
     
     for conn in adj_list:
         src, dst = conn[0], conn[1]
@@ -432,7 +438,7 @@ def generate_links(nodedicts:dict, adjacency, nodes):
         # commit to these adp_port connections.
         node_id_all_ports[src_id][src_first_available_adp_port] = 1
         node_id_all_ports[dst_id][dst_first_available_adp_port] = 1
-        print('connected', src, dst, node_id_all_ports[src_id], node_id_all_ports[dst_id])
+        # print('connected', src, dst, node_id_all_ports[src_id], node_id_all_ports[dst_id])
         
         # generate new link id.
         new_link_id = random_id_generator()
@@ -519,7 +525,7 @@ def random_mac_generator(device: int) -> str:
         sixth_2 = ''.join([correspondence[i] for i in np.random.randint(22, size=2)])
         return f'{first_2}:{second_2}:{third_2}:{fourth_2}:{fifth_2}:{sixth_2}'
     elif device == 0:
-        first_4 = ''.join([correspondence[i] for i in np.random.randint(22, size=4)])
+        first_4 = 'c2' + ''.join([correspondence[i] for i in np.random.randint(22, size=2)])
         second_4 = ''.join([correspondence[i] for i in np.random.randint(22, size=4)])
         third_4 = ''.join([correspondence[i] for i in np.random.randint(22, size=4)])
         return f'{first_4}.{second_4}.{third_4}'
@@ -588,7 +594,7 @@ def node_spacing(node_dicts, adjacency_matrix, scene_height, scene_width):
 def find_node_ids(nodes):
     node_correspondence = {}
     for node in nodes:
-        print("looking up node in nodes", node)
+        # print("looking up node in nodes", node)
         node_correspondence[int(node["name"][2:])] = (node['node_id'], node['node_type'])
     return node_correspondence
 
@@ -600,12 +606,12 @@ def visualize_gns3_graph(adjacency_matrix):
     nx.draw(gr, with_labels=True)
 
 class Configurator(object):    
-    def __init__(self, file_path, config_parent, **kwargs):
+    def __init__(self, file_path, config_parent, args):
         self.file_path = file_path
         self.config_parent = config_parent
         with open(self.file_path, "r") as f:
             self.file_config = json.loads(f.read())
-        self.additional = kwargs
+        self.flags = args
         self.ip_address_assignment = {}
         self.netmask = 24
         ###########################
@@ -623,8 +629,97 @@ class Configurator(object):
         self.r2r_ports = set()
         self.r2r_ips = set()
         self.r2r_ips_dict = collections.defaultdict(set)
-        self.configure_forwarding()
+        ###########################
+        # For each (router, adaptor, port) combo, the ospf area defaults to 0 (unassigned).
+        self.ospf_area = collections.defaultdict(int)
+        is_loop = self.is_loop()
+        if 'ospf' not in self.flags:
+            self.configure_forwarding()
+        elif is_loop:
+            print('\033[93m' + 'Cycle Detected in Router Connections.' + '\033[0m')
+            print('\033[93m' + 'Dynamically Assigning Interface Areas.' + '\033[0m')
+        ###########################
         
+    def is_loop(self) -> bool:
+        real_conns = set()
+        for key in self.adj:
+            for conn in self.adj[key]:
+                source_port, destination, destination_port, source_adapter, destination_adapter = conn
+                source, dest = (key, source_adapter, source_port), (destination, destination_adapter, destination_port)
+                if self.node_dict[key][1] == 'dynamips' and self.node_dict[destination][1] == 'dynamips':
+                    sorted_conn = sorted([source, dest])
+                    sorted_conn = (sorted_conn[0][0], sorted_conn[0][1], sorted_conn[0][2], sorted_conn[1][0], sorted_conn[1][1], sorted_conn[1][2])
+                    if sorted_conn not in real_conns:
+                        real_conns.add(sorted_conn)
+
+        nodes = set()
+        adj = collections.defaultdict(set)
+        for s, _, _, d, _, _ in real_conns:
+            nodes.add(s)
+            nodes.add(d)
+            adj[s].add(d)
+            adj[d].add(s)
+        
+        visited = set()
+        queue = [node for node in adj if len(adj[node]) == 1]
+        while queue:
+            visited.add(queue[0])
+            front = queue.pop(0)
+            for neigh in adj[front]:
+                adj[neigh].remove(front)
+                if len(adj[neigh]) == 1:
+                    queue.append(neigh)
+                if len(adj[neigh]) == 0:
+                    del adj[neigh]
+            del adj[front]
+
+        status = (len(visited) != len(nodes))
+        print(status, self.flags)
+        if status and 'ospf' in self.flags:
+            # Assigning ospf interface areas.
+            self.assign_ospf_area(real_conns, adj)
+        return status
+
+    def assign_ospf_area(self, real_conns: set, adj: dict) -> None:
+        queue = [list(adj.keys())[0]]
+        visited = {list(adj.keys())[0]}
+        edges = set()
+        while queue:
+            front = queue.pop(0)
+            for neigh in adj[front]:
+                if neigh not in visited:
+                    visited.add(neigh)
+                    if (neigh, front) not in edges:
+                        edges.add((front, neigh))
+                    queue.append(neigh)
+
+        port_lookup = {}
+        for s, s_adaptor, s_port, d, d_adaptor, d_port in real_conns:
+            port_lookup[(s, d)] = (s_adaptor, s_port, d_adaptor, d_port)
+
+        backbone_r2r, non_backbone_r2r = set(), set()
+        # Get router to router connections that should be INCLUDED into the backbone area 0. 
+        for edge_start, edge_end in edges:
+            if (edge_start, edge_end) in port_lookup:
+                start_adp, start_port, dest_adp, dest_port = port_lookup[(edge_start, edge_end)]
+            else:
+                dest_adp, dest_port, start_adp, start_port = port_lookup[(edge_end, edge_start)]
+            backbone_r2r.add((edge_start, start_adp, start_port, edge_end, dest_adp, dest_port))
+
+        # Get router to router connections that should be EXCLUDED from the backbone area 0. 
+        counter = 1
+        for s, s_adaptor, s_port, d, d_adaptor, d_port in real_conns:
+            if ((s, s_adaptor, s_port, d, d_adaptor, d_port) not in backbone_r2r and
+                (d, d_adaptor, d_port, s, s_adaptor, s_port) not in backbone_r2r and 
+                (d, d_adaptor, d_port, s, s_adaptor, s_port) not in non_backbone_r2r):
+                non_backbone_r2r.add((s, s_adaptor, s_port, d, d_adaptor, d_port))
+                self.ospf_area[(s, s_adaptor, s_port)] = counter
+                self.ospf_area[(d, d_adaptor, d_port)] = counter
+                counter += 1
+        
+        print(counter)
+        return
+
     def find_new_subnet_range(self):
         # This function finds you a 24-netmask subnet range.
         # returns an integer number that helps you to convert to an ip address.
@@ -724,13 +819,13 @@ class Configurator(object):
                     print(os.mkdir(f'{self.config_parent}/project-files/dynamips/{key}/configs', 0o777))
                 
                 index_number = int((self.node_dict[key][0].split('_'))[1])+10
-                if not os.path.exists(f'{self.config_parent}/project-files/dynamips/{key}/configs/i{index_number}_private-config.cfg'):
+                if not os.path.exists(f'{self.config_parent}/project-files/dynamips/{key}/configs/i{index_number}_startup-config.cfg'):
                     # This file is only generated once.
-                    with open(f'{self.config_parent}/project-files/dynamips/{key}/configs/i1_private-config.cfg', 'w') as f:
+                    with open(f'{self.config_parent}/project-files/dynamips/{key}/configs/i{index_number}_startup-config.cfg', 'w') as f:
                         f.write("!\n!\n!\n!\n")
                         f.write("service timestamps debug datetime msec\nservice timestamps log datetime msec\nno service password-encryption\n")
                         f.write("!\n")
-                        f.write(f"hostname {self.node_dict[key][0]}")
+                        f.write(f"hostname {self.node_dict[key][0]}\n")
                         f.write("!\n")
                         f.write("ip cef\nno ip domain-lookup\nno ip icmp rate-limit unreachable\nip tcp synwait 5\nno cdp log mismatch duplex\n")
                         f.write("!\n")
@@ -768,11 +863,8 @@ class Configurator(object):
         for key in self.node_dict:
             if self.node_dict[key][1] == 'dynamips':
                 index_number = int((self.node_dict[key][0].split('_'))[1])+10
-                with open(f'{self.config_parent}/project-files/dynamips/{key}/configs/i{index_number}_startup-config.cfg', 'w') as f:
+                with open(f'{self.config_parent}/project-files/dynamips/{key}/configs/i{index_number}_private-config.cfg', 'w') as f:
                     startup_config =   f'''
-                                        !
-                                        !
-
                                         !
                                         version 12.4
                                         service timestamps debug datetime msec
@@ -832,16 +924,25 @@ class Configurator(object):
                                         '''
                     
                     startup_config += '!'.join(interface_dict[key])
-                    startup_config += '!'
+                    startup_config += '!\n'
                     
-                    
-                    for forward_info in self.forwarding_rules[key]:
-                        outbound_packets_subnet, netmask, router_interface = forward_info
-                        startup_config +=     f'''
-                                               ip forward-protocol nd
-                                               ip route {outbound_packets_subnet} {netmask} {router_interface}
-                                               !
-                                               '''
+                    if 'ospf' in self.flags:
+                        startup_config += 'router ospf 10\n'
+                        startup_config += ' log-adjacency-changes\n'
+                        startup_config += f' network {clean_string_ip_address(self.ip_address_assignment[(key, 0, 0)])} 0.0.0.127 area {0}\n' if (key, 0, 0) in self.ip_address_assignment else ""
+                        startup_config += f' network {clean_string_ip_address(self.ip_address_assignment[(key, 0, 1)])} 0.0.0.127 area {0}\n' if (key, 0, 1) in self.ip_address_assignment else ""
+                        startup_config += f' network {clean_string_ip_address(self.ip_address_assignment[(key, 1, 0)])} 0.0.0.127 area {0}\n' if (key, 1, 0) in self.ip_address_assignment else ""
+                        startup_config += f' network {clean_string_ip_address(self.ip_address_assignment[(key, 2, 0)])} 0.0.0.127 area {0}\n' if (key, 2, 0) in self.ip_address_assignment else ""
+                        startup_config += f'ip forward-protocol nd\n'
+                        startup_config += '!'
+                    else:
+                        for forward_info in self.forwarding_rules[key]:
+                            outbound_packets_subnet, netmask, router_interface = forward_info
+                            startup_config +=     f'''
+                                                ip forward-protocol nd
+                                                ip route {outbound_packets_subnet} {netmask} {router_interface}
+                                                !
+                                                '''
                     startup_config +=   '''
                                         !
                                         no ip http server
@@ -887,8 +988,9 @@ class Configurator(object):
         '''
         Configure vpcs settings.
         '''
-        if 'netmask' in self.additional:
-            self.netmask = self.additional['netmask']
+        # Commented out because this is not applicable.
+        # if 'netmask' in self.additional:
+        #     self.netmask = self.additional['netmask']
 
         # Dynamically allocate ip address.
         self.dynamic_address_allocation()
@@ -1017,6 +1119,7 @@ class Configurator(object):
                     self.forwarding_rules[router].append((self.convert_int_to_ip_address(dest_ip), '255.255.255.0', forward_ip))
 
     def configure_vpcs(self):
+        # print(self.ip_address_assignment)
         # Check whether there is a project-file folder in source parent.
         if not os.path.exists(f'{self.config_parent}/project-files'):
             print(os.mkdir(f'{self.config_parent}/project-files', 0o777))
@@ -1026,10 +1129,12 @@ class Configurator(object):
             
         for raw_key in self.ip_address_assignment:
             key = raw_key if isinstance(raw_key, str) else raw_key[0]
+            # print('within configure_vpcs ', raw_key, key, self.node_dict[key][1])
             if self.node_dict[key][1] == 'vpcs': 
                 if not os.path.exists(f'{self.config_parent}/project-files/vpcs/{key}'):
                     print(os.mkdir(f'{self.config_parent}/project-files/vpcs/{key}', 0o777))
                 with open(f'{self.config_parent}/project-files/vpcs/{key}/startup.vpc', 'w') as f:
+                    # print(f'configuring {key}')
                     f.write(f'set pcname {self.node_dict[key][0]}\n')
                     local_gateway = self.ip_address_assignment[key]
                     local_gateway_list = local_gateway.split('.')
@@ -1040,8 +1145,8 @@ class Configurator(object):
     def dynamic_address_allocation(self):
         # get the number of routers. 
         switches = [(i, self.node_dict[i][0]) for i in self.node_dict if self.node_dict[i][1] == 'ethernet_switch']
-        print("asdasad", switches)
-        print('node_dict', self.node_dict)
+        #print("asdasad", switches)
+        #print('node_dict', self.node_dict)
         # TODO: change the assumption, probably does not work in the general case.
         # Current assumption is consecutive switches share the same router. 
         # So we do sorting. :(
@@ -1087,7 +1192,7 @@ class Configurator(object):
                 if key == item:
                     continue
                 self.ip_address_assignment[item] = self.convert_int_to_ip_address(base_subnet_range)
-                print(self.convert_int_to_ip_address(base_subnet_range))
+                # print(self.convert_int_to_ip_address(base_subnet_range))
                 base_subnet_range += 1
             
             # shift to another subnet range, do not land at x.x.x.1 or x.x.x.129.
@@ -1106,7 +1211,7 @@ class Configurator(object):
                                 break
         
                         if not sample_subnet_device:
-                            print(self.subnet_ip_dict[key], self.ip_address_assignment)
+                            # print(self.subnet_ip_dict[key], self.ip_address_assignment)
                             raise NotImplemented
                     
                         subnet_ip = self.ip_address_assignment[sample_subnet_device]

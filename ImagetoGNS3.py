@@ -369,6 +369,8 @@ def parse():
                         help='GNS3 project dir')
     parser.add_argument('--model', dest="model", type=str,
                         help='Recognition model path')
+    parser.add_argument('--additional',dest="additional", type=str,
+                          default="", help="additional arguments")
 
     return parser.parse_args()
 
@@ -378,6 +380,7 @@ def main():
     user_img_path = args.img 
     model_final_path = "./model_final.pth" if not args.model else args.model
     name = args.name
+    additional = args.additional.split(' ')
     outputDir = args.dir
 
     mat = args.mat
@@ -389,7 +392,7 @@ def main():
       with open(list) as l:
         node_dicts = js.load(l)
       InfotoGNS3.generate_gns3file(name, outputDir, node_dicts, adjacency_matrix)
-      configrator = InfotoGNS3.Configurator(outputDir+"/"+name+".gns3", outputDir)
+      configrator = InfotoGNS3.Configurator(outputDir+"/"+name+".gns3", outputDir, additional)
       configrator.configure_vpcs()
       configrator.configure_routers()
     else:
