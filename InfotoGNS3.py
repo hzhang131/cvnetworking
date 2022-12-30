@@ -8,6 +8,7 @@ import copy
 
 import collections
 import os
+import shutil
 
 ROUTER = 0
 SWITCH = 1
@@ -630,6 +631,12 @@ class Configurator(object):
         self.r2r_ips = set()
         self.r2r_ips_dict = collections.defaultdict(set)
         ###########################
+        try:
+            if os.path.exists(f'{self.config_parent}/project-files'):
+                shutil.rmtree(f'{self.config_parent}/project-files')
+        except:
+            raise Exception("project-files folder exists and it cannot be removed.")
+        ###########################
         # For each (router, adaptor, port) combo, the ospf area defaults to 0 (unassigned).
         self.ospf_area = collections.defaultdict(int)
         is_loop = self.is_loop()
@@ -681,6 +688,10 @@ class Configurator(object):
         return status
 
     def assign_ospf_area(self, real_conns: set, adj: dict) -> None:
+        # This function extracts a tree from the connected graph and assigns the remaining edges to different areas. 
+        # There are probably more ways to do this, but it gets a low priority. 
+        # Turns out we could assign every interface to area 0.
+
         queue = [list(adj.keys())[0]]
         visited = {list(adj.keys())[0]}
         edges = set()
@@ -717,7 +728,6 @@ class Configurator(object):
                 self.ospf_area[(d, d_adaptor, d_port)] = counter
                 counter += 1
         
-        print(counter)
         return
 
     def find_new_subnet_range(self):
@@ -988,20 +998,13 @@ class Configurator(object):
         '''
         Configure vpcs settings.
         '''
-        # Commented out because this is not applicable.
-        # if 'netmask' in self.additional:
-        #     self.netmask = self.additional['netmask']
-
         # Dynamically allocate ip address.
         self.dynamic_address_allocation()
             
-    # def configure_forwarding(self, router_id):
     def configure_forwarding(self):
         '''
         Configure the forwarding rules for a specific router.
         '''
-        # TODO: Design a routing table.
-        
         for key in self.adj:
             for conn in self.adj[key]:
                 source_port, destination, destination_port, source_adapter, destination_adapter = conn
@@ -1013,47 +1016,6 @@ class Configurator(object):
                     self.r2r_ips_dict[key].add(self.ip_address_assignment[(key, source_adapter, source_port)])
                     self.r2r_ips_dict[destination].add(self.ip_address_assignment[(destination, destination_adapter, destination_port)])
                
-        # self.breadth_first_search()
-        # graph = nx.Graph()
-        # nodes = self.ip_address_assignment.keys()
-        # for e in self.edge_set:
-        #     graph.add_edge(e[0], e[1])
-
-        # for start in nodes:
-        #     if isinstance(start, tuple):
-        #         for end in nodes:
-        #             # if start != end and isinstance(end, str) and self.ip_address_assignment[end] not in self.r2r_ips_dict[end]:
-        #             if start != end:
-        #                 end_ip = self.ip_address_assignment[end]
-        #                 if end_ip not in self.r2r_ips:
-        #                     path = nx.shortest_path(graph, source=start, target=end)
-        #                     for idx in range(len(path)-1):
-        #                         if path[idx] in self.r2r_ports and path[idx+1] in self.r2r_ports:
-        #                             next_node_ip = self.ip_address_assignment[path[idx+1]]
-        #                             if next_node_ip not in self.r2r_ips_dict[start[0]]:
-        #                                 # we check whether the next_node_ip is internal. 
-        #                                 # i.e. belongs to another adp/port combination from the same router.
-        #                                 self.forwarding_table[start].add((end_ip, '255.255.255.0', next_node_ip))
-        #                             break
-        
-        # Merge forwarding table entries.
-        #         fw_rules = {}
-        #         for i in self.forwarding_table:
-        #             if i[0] not in fw_rules:
-        #                 fw_rules[i[0]] = set()
-        #             fw_rules[i[0]] = fw_rules[i[0]].union(self.forwarding_table[i])
-            
-        #         for router in fw_rules:
-        #             destination_ips = collections.defaultdict(set)
-        #             for end_ip, netmask, next_node_ip in fw_rules[router]:
-        #                 destination_ips[next_node_ip].add(self.convert_ip_address_to_int(end_ip) & 0xFFFFFF00)
-        #             for forward_ip in destination_ips:
-        #                 # Make sure that the router does not intra-router forwarding. (We already have checked that)
-        # #                 intrarouter_ips = [self.ip_address_assignment[(router, adp, port)] for adp, port in self.adp_port_profile[router]]
-        # #                 if forward_ip in self.r2r_ips and destination_ips[forward_ip] not in self.r2r_ips:
-        #                 for dest_ip in destination_ips[forward_ip]:    
-        #                     self.forwarding_rules[router].append((self.convert_int_to_ip_address(dest_ip), '255.255.255.0', forward_ip))
-
         raw_edge_set = set()
         for conn in self.adj:
             source = conn
@@ -1084,11 +1046,11 @@ class Configurator(object):
         for start in nodes:
             if isinstance(start, tuple):
                 for end in nodes:
-                    if start != end and isinstance(end, str) and self.ip_address_assignment[end] not in self.r2r_ips_dict[end]:
+                    if start != end:
                         end_ip = self.ip_address_assignment[end]
-                        if end_ip not in self.r2r_ips:
+                        # We include router interface end ip addresses if no router ips have been assigned.
+                        if True:
                             path = nx.dijkstra_path(graph, source=start, target=end)
-                            # print("one available path", path)
                             for idx in range(len(path)-1):
                                 print(path[idx], path[idx+1], self.r2r_ports)
                                 if path[idx] in self.r2r_ports and path[idx+1] in self.r2r_ports:
@@ -1096,9 +1058,10 @@ class Configurator(object):
                                     if next_node_ip not in self.r2r_ips_dict[start[0]]:
                                         # we check whether the next_node_ip is internal. 
                                         # i.e. belongs to another adp/port combination from the same router.
+                                        # We also need to check whether we generated multiple forwarding rules for one single end_ip
                                         self.forwarding_table[start].add((end_ip, '255.255.255.0', next_node_ip))
                                     break
-
+        
         # Merge forwarding table entries.
         fw_rules = {}
         for i in self.forwarding_table:
@@ -1106,16 +1069,25 @@ class Configurator(object):
                 fw_rules[i[0]] = set()
             fw_rules[i[0]] = fw_rules[i[0]].union(self.forwarding_table[i])
 
+        # TODO: get rid of duplicates, test this code block.
+        for i in fw_rules:
+            temp_rules = set()
+            visited_end_ip = set()
+            for r in fw_rules[i]:
+                if clean_string_ip_address(r[0]) not in visited_end_ip:
+                    visited_end_ip.add(clean_string_ip_address(r[0]))
+                    temp_rules.add(r)
+            fw_rules[i] = temp_rules
+            print(i, temp_rules)
+
         for router in fw_rules:
             destination_ips = collections.defaultdict(set)
-            for end_ip, netmask, next_node_ip in fw_rules[router]:
-                # print(router, next_node_ip, self.convert_int_to_ip_address(self.convert_ip_address_to_int(end_ip) & 0xFFFFFF00))
+            for end_ip, _, next_node_ip in fw_rules[router]:
                 destination_ips[next_node_ip].add(self.convert_ip_address_to_int(end_ip) & 0xFFFFFF00)
             for forward_ip in destination_ips:
                 # Make sure that the router does not intra-router forwarding. (We already have checked that)
-                # intrarouter_ips = [self.ip_address_assignment[(router, adp, port)] for adp, port in self.adp_port_profile[router]]
-                # if forward_ip in self.r2r_ips and destination_ips[forward_ip] not in self.r2r_ips:
-                for dest_ip in destination_ips[forward_ip]:    
+                for dest_ip in destination_ips[forward_ip]: 
+                    print(router, self.convert_int_to_ip_address(dest_ip), forward_ip)   
                     self.forwarding_rules[router].append((self.convert_int_to_ip_address(dest_ip), '255.255.255.0', forward_ip))
 
     def configure_vpcs(self):
@@ -1145,8 +1117,6 @@ class Configurator(object):
     def dynamic_address_allocation(self):
         # get the number of routers. 
         switches = [(i, self.node_dict[i][0]) for i in self.node_dict if self.node_dict[i][1] == 'ethernet_switch']
-        #print("asdasad", switches)
-        #print('node_dict', self.node_dict)
         # TODO: change the assumption, probably does not work in the general case.
         # Current assumption is consecutive switches share the same router. 
         # So we do sorting. :(
@@ -1211,7 +1181,6 @@ class Configurator(object):
                                 break
         
                         if not sample_subnet_device:
-                            # print(self.subnet_ip_dict[key], self.ip_address_assignment)
                             raise NotImplemented
                     
                         subnet_ip = self.ip_address_assignment[sample_subnet_device]
