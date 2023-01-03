@@ -363,6 +363,8 @@ def parse():
                         help='Predefined adjacency matrix path')
     parser.add_argument('--lis', dest="lis", type=str,
                         help='Predifined nodelist path')
+    parser.add_argument('--gns3_file', dest="gns3_file", type=str,
+                        help='gns3 topology description file')
     parser.add_argument('--name', dest="name", type=str,
                         help='GNS3 project name')
     parser.add_argument('--dir', dest="dir", type=str,
@@ -385,6 +387,7 @@ def main():
 
     mat = args.mat
     list = args.lis
+    gns3_file = args.gns3_file
     if mat != None:
       # with open(mat) as m:
       with open(mat) as m:
@@ -393,6 +396,11 @@ def main():
         node_dicts = js.load(l)
       InfotoGNS3.generate_gns3file(name, outputDir, node_dicts, adjacency_matrix)
       configrator = InfotoGNS3.Configurator(outputDir+"/"+name+".gns3", outputDir, additional)
+      configrator.configure_vpcs()
+      configrator.configure_routers()
+    elif gns3_file != None:
+      # input GNS3 topology file into configurator.
+      configrator = InfotoGNS3.Configurator(gns3_file, outputDir, additional)
       configrator.configure_vpcs()
       configrator.configure_routers()
     else:
@@ -405,7 +413,6 @@ def main():
       img = cv2.resize(img, dim, interpolation = cv2.INTER_AREA)
       processed_img = preprocessing_img(img.copy())
       masked_img, node_dicts = get_known_icons_from_image(processed_img.copy(), model_final_path)
-      # binary_img = strengthen_binary(masked_img)
       adjacency_matrix = get_adjacency_matrix_from_blobs(masked_img.copy(), node_dicts)
       print(type(adjacency_matrix))
       print(adjacency_matrix)
