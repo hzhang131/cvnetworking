@@ -1,6 +1,6 @@
 from distutils.command import clean
 import json
-from re import S
+from re import L, S
 import numpy as np
 import networkx as nx
 import matplotlib.pyplot as plt
@@ -429,17 +429,9 @@ def generate_links(nodedicts:dict, adjacency, nodes):
             print('dropped', src, dst, node_id_all_ports[src_id], node_id_all_ports[dst_id])
             continue
         
-#         if src_type == "dynamips" and dst_type == "dynamips":
-#             # if both are routers, then we only use 0/0 and 0/1
-#             # drop connection altogether if it is not possible.
-#             if src_first_available_adp_port not in ROUTER_TO_ROUTER_ADP_PORTS or\
-#                dst_first_available_adp_port not in ROUTER_TO_ROUTER_ADP_PORTS:
-#                 continue
-        
         # commit to these adp_port connections.
         node_id_all_ports[src_id][src_first_available_adp_port] = 1
         node_id_all_ports[dst_id][dst_first_available_adp_port] = 1
-        # print('connected', src, dst, node_id_all_ports[src_id], node_id_all_ports[dst_id])
         
         # generate new link id.
         new_link_id = random_id_generator()
@@ -622,6 +614,11 @@ class Configurator(object):
         ###########################
         self.node_dict, self.adj = self.parse_links_and_nodes()
         self.subnet_ip_dict = {}
+        # This dictionary holds the router leader in a router switch 
+        # (key --> switch id, value, (router_id, adapter, port))
+        self.router_cluster_leader = {}
+        self.router_only_subnets = set()
+        ###########################
         self.max_dynamips_adapters = 3
         self.max_dynamips_ports = 2
         self.destination_subnets = {}
@@ -681,7 +678,7 @@ class Configurator(object):
             del adj[front]
 
         status = (len(visited) != len(nodes))
-        print(status, self.flags)
+        # print(status, self.flags)
         if status and 'ospf' in self.flags:
             # Assigning ospf interface areas.
             self.assign_ospf_area(real_conns, adj)
@@ -828,6 +825,8 @@ class Configurator(object):
                 if not os.path.exists(f'{self.config_parent}/project-files/dynamips/{key}/configs'):
                     print(os.mkdir(f'{self.config_parent}/project-files/dynamips/{key}/configs', 0o777))
                 
+
+                # TODO: IMPORTANT!!!!!! Change naming rules if you are directly using an imported gns3 topology file.
                 index_number = int((self.node_dict[key][0].split('_'))[1])+10
                 if not os.path.exists(f'{self.config_parent}/project-files/dynamips/{key}/configs/i{index_number}_startup-config.cfg'):
                     # This file is only generated once.
@@ -1015,6 +1014,19 @@ class Configurator(object):
                     self.r2r_ips.add(self.ip_address_assignment[(destination, destination_adapter, destination_port)])
                     self.r2r_ips_dict[key].add(self.ip_address_assignment[(key, source_adapter, source_port)])
                     self.r2r_ips_dict[destination].add(self.ip_address_assignment[(destination, destination_adapter, destination_port)])
+                elif self.node_dict[destination][1] == 'ethernet_switch' and self.node_dict[key][1] == 'dynamips':
+                    # TODO: Generate modified r2r connections in router clusters. 
+                    # TODO: To be completed tomorrow 1/2/2023
+                    if destination in self.router_cluster_leader:
+                        cluster_leader = self.router_cluster_leader[destination]
+                        # To prevent self connection.
+                        if cluster_leader[0] != key:
+                            self.r2r_ports.add((key, source_adapter, source_port))
+                            self.r2r_ports.add(cluster_leader)
+                            self.r2r_ips.add(self.ip_address_assignment[(key, source_adapter, source_port)])
+                            self.r2r_ips.add(self.ip_address_assignment[cluster_leader])
+                            self.r2r_ips_dict[key].add(self.ip_address_assignment[(key, source_adapter, source_port)])
+                            self.r2r_ips_dict[cluster_leader[0]].add(self.ip_address_assignment[cluster_leader])
                
         raw_edge_set = set()
         for conn in self.adj:
@@ -1038,9 +1050,34 @@ class Configurator(object):
                 if (dest, source) not in raw_edge_set:
                     raw_edge_set.add((source, dest))
 
+        # Diagostic Code Block, to be removed / commented
+        token_edge_set = set()
+        for i in raw_edge_set:
+            first, second = None, None
+            if isinstance(i[0], tuple):
+                first = self.node_dict[i[0][0]][1]
+            else:
+                first = self.node_dict[i[0]][1]
+
+            if isinstance(i[1], tuple):
+                second = self.node_dict[i[1][0]][1]
+            else:
+                second = self.node_dict[i[1]][1]
+            
+            if first == 'ethernet_switch' and i[0] in self.router_cluster_leader:
+                # Here, i[1] is a dynamips
+                if (self.router_cluster_leader[i[0]], i[1]) not in token_edge_set and self.router_cluster_leader[i[0]][0] != i[1][0]:
+                    token_edge_set.add((i[1], self.router_cluster_leader[i[0]]))
+            elif second == 'ethernet_switch' and i[1] in self.router_cluster_leader:
+                # Here, i[0] is a dynamips
+                if (self.router_cluster_leader[i[1]], i[0]) not in token_edge_set and self.router_cluster_leader[i[1]][0] != i[0][0]:
+                    token_edge_set.add((i[0], self.router_cluster_leader[i[1]]))
+            else:
+                token_edge_set.add(i)
+
         graph = nx.Graph()
         nodes = self.ip_address_assignment.keys()
-        for e in raw_edge_set:
+        for e in token_edge_set:
             graph.add_edge(e[0], e[1])
 
         for start in nodes:
@@ -1052,7 +1089,6 @@ class Configurator(object):
                         if True:
                             path = nx.dijkstra_path(graph, source=start, target=end)
                             for idx in range(len(path)-1):
-                                print(path[idx], path[idx+1], self.r2r_ports)
                                 if path[idx] in self.r2r_ports and path[idx+1] in self.r2r_ports:
                                     next_node_ip = self.ip_address_assignment[path[idx+1]]
                                     if next_node_ip not in self.r2r_ips_dict[start[0]]:
@@ -1078,7 +1114,7 @@ class Configurator(object):
                     visited_end_ip.add(clean_string_ip_address(r[0]))
                     temp_rules.add(r)
             fw_rules[i] = temp_rules
-            print(i, temp_rules)
+            print('lalala', i, temp_rules)
 
         for router in fw_rules:
             destination_ips = collections.defaultdict(set)
@@ -1087,7 +1123,6 @@ class Configurator(object):
             for forward_ip in destination_ips:
                 # Make sure that the router does not intra-router forwarding. (We already have checked that)
                 for dest_ip in destination_ips[forward_ip]: 
-                    print(router, self.convert_int_to_ip_address(dest_ip), forward_ip)   
                     self.forwarding_rules[router].append((self.convert_int_to_ip_address(dest_ip), '255.255.255.0', forward_ip))
 
     def configure_vpcs(self):
@@ -1132,15 +1167,32 @@ class Configurator(object):
             while queue:
                 front = queue[0]
                 for dest in self.adj[front]:
-                    if dest[1] not in visited and self.node_dict[dest[1]][1] != 'ethernet_switch' and self.node_dict[dest[1]][1] != 'dynamips':
-                        visited.add(dest[1])
-                        queue.append(dest[1])
+                    if dest[1] not in visited and self.node_dict[dest[1]][1] != 'ethernet_switch':
+                        if self.node_dict[dest[1]][1] != 'dynamips':
+                            visited.add(dest[1])
+                            queue.append(dest[1])
+                        else:
+                            router_adapter, router_port = dest[4], dest[2]
+                            visited.add((dest[1], router_adapter, router_port))
+                            queue.append((dest[1], router_adapter, router_port))
                     #####################################################
                     if self.node_dict[dest[1]][1] == 'dynamips':
                         neighboring_router_dict[s] = dest[1]
                     #####################################################
                 queue = queue[1:]
             self.subnet_ip_dict[s] = visited
+
+        # TODO: Get a list of subnets that only consist of routers.
+        for key in self.subnet_ip_dict:
+            # if we find a VPC in the subnet, we abort the operation and move on to another subnet.
+            all_router_flag = True
+            leader, largest_priority = None, 0
+            for item in self.subnet_ip_dict[key]:
+                if isinstance(item, str) and self.node_dict[item][1] == 'vpcs':
+                    all_router_flag = False
+
+            if all_router_flag == True:
+                self.router_only_subnets.add(key)
 
         # We start with 10.1.1.2 and we build upwards.
         # base_subnet_range = 0b00001010000000010000000100000010
@@ -1161,34 +1213,41 @@ class Configurator(object):
             for item in self.subnet_ip_dict[key]:
                 if key == item:
                     continue
-                self.ip_address_assignment[item] = self.convert_int_to_ip_address(base_subnet_range)
-                # print(self.convert_int_to_ip_address(base_subnet_range))
+                ##########################################################################
+                if key not in self.router_only_subnets and isinstance(item, tuple) and self.node_dict[item[0]][1] == 'dynamips':
+                    self.ip_address_assignment[item] = self.convert_int_to_ip_address(((base_subnet_range >> (32 - self.netmask)) << (32 - self.netmask)) + 1)
+                else:
+                    self.ip_address_assignment[item] = self.convert_int_to_ip_address(base_subnet_range)
+                ##########################################################################
                 base_subnet_range += 1
             
             # shift to another subnet range, do not land at x.x.x.1 or x.x.x.129.
             # these addresses will be used as gateway addresses.
             
         # find switch -- router connection, and assign ips to these interfaces.
-        for key in self.subnet_ip_dict:
-            for item in self.adj[key]:
-                if self.node_dict[item[1]][1] == 'dynamips':
-                    router_adapter, router_port = item[4], item[2]
-                    if self.subnet_ip_dict[key]:
-                        sample_subnet_device = None
-                        for device in self.subnet_ip_dict[key]:
-                            if device in self.ip_address_assignment:
-                                sample_subnet_device = device
-                                break
+        # for key in self.subnet_ip_dict:
+        #     for item in self.adj[key]:
+        #         if self.node_dict[item[1]][1] == 'dynamips':
+        #             router_adapter, router_port = item[4], item[2]
+        #             if self.subnet_ip_dict[key]:
+        #                 sample_subnet_device = None
+        #                 for device in self.subnet_ip_dict[key]:
+        #                     if device in self.ip_address_assignment:
+        #                         sample_subnet_device = device
+        #                         break
         
-                        if not sample_subnet_device:
-                            raise NotImplemented
+        #                 if not sample_subnet_device:
+        #                     # Breaks here.
+        #                     raise NotImplemented
                     
-                        subnet_ip = self.ip_address_assignment[sample_subnet_device]
-                        # TODO: convert self.find_available_ip_in_subnet to include netmask as a parameter. 
-                        # In this case, it should be 25. 
-                        # Also, create a data structure to count for this. 
-                        available_ip = self.find_available_ip_in_subnet(subnet_ip, "s2r")
-                        self.ip_address_assignment[(item[1], router_adapter, router_port)] = available_ip
+        #                 subnet_ip = self.ip_address_assignment[sample_subnet_device]
+        #                 # TODO: convert self.find_available_ip_in_subnet to include netmask as a parameter. 
+        #                 # In this case, it should be 25. 
+        #                 # Also, create a data structure to count for this. 
+        #                 available_ip = self.find_available_ip_in_subnet(subnet_ip, "s2r")
+        #                 self.ip_address_assignment[(item[1], router_adapter, router_port)] = available_ip
+
+        # print(self.ip_address_assignment)
                         
         # find router -- router connection. 
         # for each router pair, we use a new subnet with a netmask of 24.
@@ -1203,10 +1262,38 @@ class Configurator(object):
                         new_subnet_range = self.find_new_subnet_range()
                         # TODO: convert self.find_available_ip_in_subnet to include netmask as a parameter. 
                         # In this case, it should be 24. 
-                        # Also, create a data structure to count for this. 
+                        # Also, create a data structure to account for this. 
                         self.ip_address_assignment[(r, source_router_adapter, source_router_port)] = self.convert_int_to_ip_address(new_subnet_range+2)
                         self.ip_address_assignment[(destination, dest_router_adapter, dest_router_port)] = self.convert_int_to_ip_address(new_subnet_range+3)
-            
+
+        # TODO: NEW! Elect a router cluster leader.
+        for key in self.subnet_ip_dict:
+            # if we find a VPC in the subnet, we abort the operation and move on to another subnet.
+            all_router_flag = True
+            leader, largest_priority = None, 0
+            for item in self.subnet_ip_dict[key]:
+                if isinstance(item, str) and self.node_dict[item][1] == 'vpcs':
+                    all_router_flag = False
+                    break
+                elif isinstance(item, tuple) and self.node_dict[item[0]][1] == 'dynamips':
+                    # Check ip assignment on all router interfaces
+                    # TODO: remove hardcoding if it is deemed to be necessary!!!!!
+                    largest_local_priority = 0
+                    if (item[0], 0, 0) in self.ip_address_assignment:
+                        largest_local_priority = max(largest_local_priority, self.convert_ip_address_to_int(self.ip_address_assignment[(item[0], 0, 0)]))
+                    if (item[0], 0, 1) in self.ip_address_assignment:
+                        largest_local_priority = max(largest_local_priority, self.convert_ip_address_to_int(self.ip_address_assignment[(item[0], 0, 1)]))
+                    if (item[0], 1, 0) in self.ip_address_assignment:
+                        largest_local_priority = max(largest_local_priority, self.convert_ip_address_to_int(self.ip_address_assignment[(item[0], 1, 0)]))
+                    if (item[0], 2, 0) in self.ip_address_assignment:
+                        largest_local_priority = max(largest_local_priority, self.convert_ip_address_to_int(self.ip_address_assignment[(item[0], 2, 0)]))
+                    if largest_local_priority > largest_priority:
+                        leader = item
+                        largest_priority = largest_local_priority
+                    
+            if all_router_flag:
+                self.router_cluster_leader[key] = leader
+
     def parse_links_and_nodes(self):
         links = self.file_config['topology']['links']
         nodes = self.file_config['topology']['nodes']
@@ -1259,7 +1346,6 @@ class Configurator(object):
                 dest = (destination, destination_adapter, destination_port)
                 if self.node_dict[destination][1] != 'dynamips':
                     dest = destination
-                
                 if dest not in visited:
                     queue.append(dest)
                     visited.add(dest)
