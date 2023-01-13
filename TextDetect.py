@@ -82,6 +82,8 @@ def text_process(img_path):
         mask = np.logical_or(new_mask, mask)
         border = [x,y,w,h]
         words = text.split(' ')
+        if len(words) < 2:
+            continue
         words[0] = difflib.get_close_matches(words[0], vocabs, n=1)[0]
         fixedname = ' '.join(words)
         node_dicts.append({
