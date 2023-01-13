@@ -1,6 +1,7 @@
 from distutils.command import clean
 import json
 from re import L, S
+from xmlrpc.client import ProtocolError
 import numpy as np
 import networkx as nx
 import matplotlib.pyplot as plt
@@ -10,6 +11,7 @@ import collections
 import os
 import shutil
 
+BACKBONE = 0
 ROUTER = 0
 SWITCH = 1
 VPC = 4
@@ -617,6 +619,7 @@ class Configurator(object):
         # This dictionary holds the router leader in a router switch 
         # (key --> switch id, value, (router_id, adapter, port))
         self.router_cluster_leader = {}
+        self.router_cluster_lookup = {}
         self.router_only_subnets = set()
         ###########################
         self.max_dynamips_adapters = 3
@@ -627,6 +630,8 @@ class Configurator(object):
         self.r2r_ports = set()
         self.r2r_ips = set()
         self.r2r_ips_dict = collections.defaultdict(set)
+        self.backbone_size = None
+        self.backbone_ABRs_ports = set()
         ###########################
         try:
             if os.path.exists(f'{self.config_parent}/project-files'):
@@ -636,59 +641,55 @@ class Configurator(object):
         ###########################
         # For each (router, adaptor, port) combo, the ospf area defaults to 0 (unassigned).
         self.ospf_area = collections.defaultdict(int)
-        is_loop = self.is_loop()
+        self.configure_forwarding_metadata()
         if 'ospf' not in self.flags:
             self.configure_forwarding()
-        elif is_loop:
-            print('\033[93m' + 'Cycle Detected in Router Connections.' + '\033[0m')
-            print('\033[93m' + 'Dynamically Assigning Interface Areas.' + '\033[0m')
+        else:
+            self.backbone_size = input('\033[93m' + 'ACTION REQUIRED: Please input the size of backbone area, positive integer only!\nIf you wish to include all routers into the backbone area, please type all\nYour current selection is: ' + '\033[0m')
+            try:
+                self.backbone_size = int(self.backbone_size)
+                if self.backbone_size < 2:
+                    raise Exception('The backbone area size has to be greater than one!')
+            except Exception as e:
+                if self.backbone_size != 'all':
+                    print('\033[91m' + str(e) + '\033[0m')
+                    exit(-1)
+            if self.backbone_size != 'all':
+                self.assign_ospf_area_wrapper()
         ###########################
         
-    def is_loop(self) -> bool:
-        real_conns = set()
+    def assign_ospf_area_wrapper(self) -> None:
+        conns = set()
         for key in self.adj:
             for conn in self.adj[key]:
                 source_port, destination, destination_port, source_adapter, destination_adapter = conn
                 source, dest = (key, source_adapter, source_port), (destination, destination_adapter, destination_port)
-                if self.node_dict[key][1] == 'dynamips' and self.node_dict[destination][1] == 'dynamips':
+                if self.node_dict[key][1] == 'dynamips' or self.node_dict[destination][1] == 'dynamips':
                     sorted_conn = sorted([source, dest])
                     sorted_conn = (sorted_conn[0][0], sorted_conn[0][1], sorted_conn[0][2], sorted_conn[1][0], sorted_conn[1][1], sorted_conn[1][2])
-                    if sorted_conn not in real_conns:
-                        real_conns.add(sorted_conn)
+                    if sorted_conn not in conns:
+                        conns.add(sorted_conn)
 
         nodes = set()
         adj = collections.defaultdict(set)
-        for s, _, _, d, _, _ in real_conns:
+        for s, _, _, d, _, _ in conns:
             nodes.add(s)
             nodes.add(d)
             adj[s].add(d)
             adj[d].add(s)
         
-        visited = set()
-        queue = [node for node in adj if len(adj[node]) == 1]
-        while queue:
-            visited.add(queue[0])
-            front = queue.pop(0)
-            for neigh in adj[front]:
-                adj[neigh].remove(front)
-                if len(adj[neigh]) == 1:
-                    queue.append(neigh)
-                if len(adj[neigh]) == 0:
-                    del adj[neigh]
-            del adj[front]
+        self.assign_ospf_area(conns, adj)
+        return
 
-        status = (len(visited) != len(nodes))
-        # print(status, self.flags)
-        if status and 'ospf' in self.flags:
-            # Assigning ospf interface areas.
-            self.assign_ospf_area(real_conns, adj)
-        return status
-
-    def assign_ospf_area(self, real_conns: set, adj: dict) -> None:
+    def assign_ospf_area_tree(self, real_conns: set, adj: dict) -> None:
         # This function extracts a tree from the connected graph and assigns the remaining edges to different areas. 
         # There are probably more ways to do this, but it gets a low priority. 
         # Turns out we could assign every interface to area 0.
-
+        '''
+        TODO: decide whether we need to remove this function in the future. 
+        Since it will NOT support router clusters!!!!!
+        Multi-line Commented for higher visibility
+        '''
         queue = [list(adj.keys())[0]]
         visited = {list(adj.keys())[0]}
         edges = set()
@@ -727,6 +728,261 @@ class Configurator(object):
         
         return
 
+    def assign_ospf_area(self, real_conns: set, adj: dict) -> None:
+        # First assigns the backbone area of user-specified size
+        # Then assigns incident areas.
+        # To be completed 1/7/2023.
+        # Could take me a day or two hahaha.
+
+        '''
+        Rough Approach for Backbone area assignment. 
+        If there are router clusters:
+        1. Group all router clusters into cluster candidates. 
+        1.1 If there are router clusters that has less than self.backbone_size routers, expand until the size requirement is satisfied.
+        1.2 Else we choose the router cluster with the smallest-sized router cluster as the backbone area
+        If there aren't any router clusters, or if all router clusters have more routers than specified.  
+        2. Choose any router as the anchor, expand until the size requirement is satisfied.
+        '''
+        port_lookup = {}
+        port_usage = collections.defaultdict(set)
+        for s, s_adaptor, s_port, d, d_adaptor, d_port in real_conns:
+            port_lookup[(s, d)] = (s_adaptor, s_port, d_adaptor, d_port)
+            port_usage[s].add((s_adaptor, s_port))
+            port_usage[d].add((d_adaptor, d_port))
+
+        backbone_candidate = None
+        current_backbone_routers = set()
+        if self.router_cluster_leader:
+            size_diff = float('inf')
+            for key in self.router_cluster_leader:
+                if self.backbone_size >= len(adj[key]) and size_diff > self.backbone_size - len(adj[key]):
+                    print(self.backbone_size, len(adj[key]))
+                    size_diff = self.backbone_size - len(adj[key]) + 1
+                    backbone_candidate = key
+
+            if backbone_candidate != None:
+                # add all inner facing interfaces into the backbone area.
+                for router_id in adj[backbone_candidate]:
+                    if (router_id, key) in port_lookup:
+                        router_adaptor, router_port, _, _ = port_lookup[(router_id, key)]
+                        self.ospf_area[(router_id, router_adaptor, router_port)] = BACKBONE
+                        current_backbone_routers.add(router_id)
+                    elif (key, router_id) in port_lookup:
+                        _, _, router_adaptor, router_port = port_lookup[(key, router_id)]
+                        self.ospf_area[(router_id, router_adaptor, router_port)] = BACKBONE
+                        current_backbone_routers.add(router_id)
+                backbone_size_deficit = self.backbone_size - len(current_backbone_routers)
+                if backbone_size_deficit > 0:
+                    # find the router that has the most available and non-area-assigned interfaces, then use that router as an anchor. 
+                    max_unused_ports = 0
+                    anchor = None
+                    for router_id in current_backbone_routers:
+                        unused_ports = 0
+                        if (router_id, 0, 0) not in self.ospf_area and (router_id, 0, 0) in self.r2r_ports:
+                            unused_ports += 1
+                        if (router_id, 0, 1) not in self.ospf_area and (router_id, 0, 1) in self.r2r_ports:
+                            unused_ports += 1
+                        if (router_id, 1, 0) not in self.ospf_area and (router_id, 1, 0) in self.r2r_ports:
+                            unused_ports += 1
+                        if (router_id, 2, 0) not in self.ospf_area and (router_id, 2, 0) in self.r2r_ports:
+                            unused_ports += 1
+                        if unused_ports > max_unused_ports:
+                            max_unused_ports = unused_ports
+                            anchor = router_id
+
+                    if anchor == None:
+                        raise Exception('\033[91m' + "1, Topology is either detached, or there are not enough routers." + '\033[0m')
+                    else:
+                        queue, visited = [anchor], {anchor}
+                        while queue:
+                            front = queue.pop(0)
+                            for neigh in adj[front]:
+                                if neigh not in visited and self.node_dict[neigh][1] == 'dynamips':
+                                    visited.add(neigh)
+                                    if (front, neigh) in port_lookup:
+                                        front_adaptor, front_port, neigh_adaptor, neigh_port = port_lookup[(front, neigh)]
+                                        self.ospf_area[(front, front_adaptor, front_port)] = BACKBONE
+                                        self.ospf_area[(neigh, neigh_adaptor, neigh_port)] = BACKBONE
+                                    else:
+                                        # There should not be any exception thrown here if everything goes as planned.
+                                        neigh_adaptor, neigh_port, front_adaptor, front_port = port_lookup[(neigh, front)]
+                                        self.ospf_area[(front, front_adaptor, front_port)] = BACKBONE
+                                        self.ospf_area[(neigh, neigh_adaptor, neigh_port)] = BACKBONE
+                                    queue.append(neigh)
+                                    current_backbone_routers.add(neigh)
+                            if self.backbone_size - len(current_backbone_routers) == 0:
+                                break
+
+                        if backbone_size_deficit > 0:
+                            raise Exception('\033[91m' + "2, Topology is either detached, or there are not enough routers." + '\033[0m')
+
+        if backbone_candidate == None:
+            # Keep trying routers that can be used as an anchor, throw exception if this cannot be achieved. 
+            assigned = False
+            
+            for key in adj:
+                if self.node_dict[key][1] == 'dynamips':
+                    queue, visited = [key], {key}
+                    current_backbone_routers.add(key)
+                    while queue:
+                        front = queue.pop(0)
+                        for neigh in adj[front]:
+                            if neigh not in visited and self.node_dict[neigh][1] == 'dynamips':
+                                '''
+                                If neighbor does not belong to any router cluster, we may add routers normally.
+                                '''
+                                if neigh not in self.router_cluster_lookup:
+                                    visited.add(neigh)
+                                    if (front, neigh) in port_lookup:
+                                        front_adaptor, front_port, neigh_adaptor, neigh_port = port_lookup[(front, neigh)]
+                                        self.ospf_area[(front, front_adaptor, front_port)] = BACKBONE
+                                        self.ospf_area[(neigh, neigh_adaptor, neigh_port)] = BACKBONE
+                                    else:
+                                        # There should not be any exception thrown here if everything goes as planned.
+                                        neigh_adaptor, neigh_port, front_adaptor, front_port = port_lookup[(neigh, front)]
+                                        self.ospf_area[(front, front_adaptor, front_port)] = BACKBONE
+                                        self.ospf_area[(neigh, neigh_adaptor, neigh_port)] = BACKBONE
+                                    queue.append(neigh)
+                                    current_backbone_routers.add(neigh)
+                                else:
+                                    '''
+                                    If that is not the case, then we have to add all routers in the router cluster. 
+                                    If adding these many routers will exceed the backbone size, we will skip this neighbor all together. 
+                                    '''
+                                    switch_id = self.router_cluster_lookup[neigh]
+                                    if len(current_backbone_routers) + len(adj[switch_id]) > self.backbone_size:
+                                        continue
+                                    else:
+                                        # add incident router into current_backbone_cluster
+                                        visited.add(neigh)
+                                        if (front, neigh) in port_lookup:
+                                            front_adaptor, front_port, neigh_adaptor, neigh_port = port_lookup[(front, neigh)]
+                                            self.ospf_area[(front, front_adaptor, front_port)] = BACKBONE
+                                            self.ospf_area[(neigh, neigh_adaptor, neigh_port)] = BACKBONE
+                                        else:
+                                            # There should not be any exception thrown here if everything goes as planned.
+                                            neigh_adaptor, neigh_port, front_adaptor, front_port = port_lookup[(neigh, front)]
+                                            self.ospf_area[(front, front_adaptor, front_port)] = BACKBONE
+                                            self.ospf_area[(neigh, neigh_adaptor, neigh_port)] = BACKBONE
+                                        queue.append(neigh)
+                                        current_backbone_routers.add(neigh)
+                                        # Assign all router interfaces that connect with the switch area 0
+                                        for cluster_router in adj[switch_id]:
+                                            if (switch_id, cluster_router) in port_lookup:
+                                                _, _,  router_adaptor, router_port = port_lookup[(switch_id, cluster_router)]
+                                            else:
+                                                router_adaptor, router_port, _, _ = port_lookup[(cluster_router, switch_id)]
+                                            self.ospf_area[(cluster_router, router_adaptor, router_port)] = BACKBONE
+                                            queue.append(router_id)
+                                            visited.add(router_id)
+                                            current_backbone_routers.add(neigh)
+                            if self.backbone_size - len(current_backbone_routers) == 0:
+                                assigned = True
+                                break
+                        
+                        if assigned:
+                            break
+
+                    if self.backbone_size - len(current_backbone_routers) == 0:
+                        assigned = True
+                        break
+                    else:
+                        current_backbone_routers = set()
+                        self.ospf_area = collections.defaultdict(int)
+                    if assigned:
+                        break
+
+            if not assigned:
+                raise Exception('\033[91m' + "There are not enough routers, or there is something wrong with the topology." + '\033[0m')
+        
+        # Scan the backbone area to find the ABRs. 
+        for router_id, _, _ in self.ospf_area:
+            if (router_id, 0, 0) in self.r2r_ports and (router_id, 0, 0) not in self.ospf_area:
+                self.backbone_ABRs_ports.add((router_id, 0, 0))
+            elif (router_id, 0, 1) in self.r2r_ports and (router_id, 0, 1) not in self.ospf_area:
+                self.backbone_ABRs_ports.add((router_id, 0, 1))
+            elif (router_id, 1, 0) in self.r2r_ports and (router_id, 1, 0) not in self.ospf_area:
+                self.backbone_ABRs_ports.add((router_id, 1, 0))
+            elif (router_id, 2, 0) in self.r2r_ports and (router_id, 2, 0) not in self.ospf_area:
+                self.backbone_ABRs_ports.add((router_id, 2, 0))
+    
+
+    
+        # At this stage, we assume that the backbone area has already been assigned!!!
+        '''
+        Rough Approach for Fringe area assignment.
+        Scan each ABR in the backbone area. 
+        If there are interfaces that have not been assigned to any area
+            If the interface of the incident router has not been assigned
+                3. Assign the unassigned ABR interface and all interfaces of the incident routers an area id, continuously expand until it can be no longer expanded. 
+            If the interface of the incident router has already been assigned.
+                4. Assign the unassigned ABR interface with the area id assigned to the interface of the incident router.
+        '''
+        current_assigned_area = 1
+        for ABR_router_id, _, _ in self.backbone_ABRs_ports:
+            incident_routers = [device for device in adj[ABR_router_id] if self.node_dict[device][1] == 'dynamips']
+            for incident_router in incident_routers:
+                if (ABR_router_id, incident_router) in port_lookup:
+                    ABR_router_adaptor, ABR_router_port, incident_adaptor, incident_port = port_lookup[(ABR_router_id, incident_router)]
+                else:
+                    incident_adaptor, incident_port, ABR_router_adaptor, ABR_router_port = port_lookup[(incident_router, ABR_router_id)]
+                
+                if (ABR_router_id, ABR_router_adaptor, ABR_router_port) not in self.ospf_area:
+                    if (incident_router, incident_adaptor, incident_port) not in self.ospf_area:
+                        # The interface of the incident router has NOT been assigned.
+                        self.ospf_area[(ABR_router_id, ABR_router_adaptor, ABR_router_port)] = current_assigned_area
+                        self.ospf_area[(incident_router, incident_adaptor, incident_port)] = current_assigned_area
+                        queue, visited = [incident_router], {incident_router}
+                        while queue:
+                            front = queue.pop(0)
+                            for neigh in adj[front]:
+                                if neigh not in visited and self.node_dict[neigh][1] == 'dynamips':
+                                    if (front, neigh) in port_lookup:
+                                        front_adaptor, front_port, neigh_adaptor, neigh_port = port_lookup[(front, neigh)]
+                                    else:
+                                        neigh_adaptor, neigh_port, front_adaptor, front_port = port_lookup[(neigh, front)]
+                                    visited.add(neigh)
+                                    queue.append(neigh)
+                                    # assign interfaces.
+                                    if (neigh, 0, 0) in self.r2r_ports and (neigh, 0, 0) not in self.ospf_area:
+                                        self.ospf_area[(neigh, 0, 0)] = current_assigned_area
+                                    if (neigh, 0, 1) in self.r2r_ports and (neigh, 0, 1) not in self.ospf_area:
+                                        self.ospf_area[(neigh, 0, 1)] = current_assigned_area
+                                    if (neigh, 1, 0) in self.r2r_ports and (neigh, 1, 0) not in self.ospf_area:
+                                        self.ospf_area[(neigh, 1, 0)] = current_assigned_area
+                                    if (neigh, 2, 0) in self.r2r_ports and (neigh, 2, 0) not in self.ospf_area:
+                                        self.ospf_area[(neigh, 2, 0)] = current_assigned_area
+
+                        current_assigned_area += 1
+
+        # Terminal router interfaces that are unassigned will get the area with the lowest number.
+        for key in adj:
+            if self.node_dict[key][1] == 'dynamips':
+                max_area = -1
+                if (key, 0, 0) in self.ospf_area:
+                    max_area = max(max_area, self.ospf_area[(key, 0, 0)])
+                if (key, 0, 1) in self.ospf_area:
+                    max_area = max(max_area, self.ospf_area[(key, 0, 1)])
+                if (key, 1, 0) in self.ospf_area:
+                    max_area = max(max_area, self.ospf_area[(key, 1, 0)])
+                if (key, 2, 0) in self.ospf_area:
+                    max_area = max(max_area, self.ospf_area[(key, 2, 0)])
+                
+                # fill in max area to unassigned interfaces.
+                if (0, 0) in port_usage[key] and (key, 0, 0) not in self.ospf_area:
+                    self.ospf_area[(key, 0, 0)] = max_area
+                if (0, 1) in port_usage[key] and (key, 0, 1) not in self.ospf_area:
+                    self.ospf_area[(key, 0, 1)] = max_area
+                if (1, 0) in port_usage[key] and (key, 1, 0) not in self.ospf_area:
+                    self.ospf_area[(key, 1, 0)] = max_area
+                if (2, 0) in port_usage[key] and (key, 2, 0) not in self.ospf_area:
+                    self.ospf_area[(key, 2, 0)] = max_area
+
+        # Uncomment if bug detected.
+        print('Final')
+        for a, b, c in self.ospf_area:
+            print(f'id: {a}, adaptor: {b}, port: {c}, area: {self.ospf_area[(a, b, c)]}')
+        return 
     def find_new_subnet_range(self):
         # This function finds you a 24-netmask subnet range.
         # returns an integer number that helps you to convert to an ip address.
@@ -938,10 +1194,10 @@ class Configurator(object):
                     if 'ospf' in self.flags:
                         startup_config += 'router ospf 10\n'
                         startup_config += ' log-adjacency-changes\n'
-                        startup_config += f' network {clean_string_ip_address(self.ip_address_assignment[(key, 0, 0)])} 0.0.0.127 area {0}\n' if (key, 0, 0) in self.ip_address_assignment else ""
-                        startup_config += f' network {clean_string_ip_address(self.ip_address_assignment[(key, 0, 1)])} 0.0.0.127 area {0}\n' if (key, 0, 1) in self.ip_address_assignment else ""
-                        startup_config += f' network {clean_string_ip_address(self.ip_address_assignment[(key, 1, 0)])} 0.0.0.127 area {0}\n' if (key, 1, 0) in self.ip_address_assignment else ""
-                        startup_config += f' network {clean_string_ip_address(self.ip_address_assignment[(key, 2, 0)])} 0.0.0.127 area {0}\n' if (key, 2, 0) in self.ip_address_assignment else ""
+                        startup_config += f' network {clean_string_ip_address(self.ip_address_assignment[(key, 0, 0)])} 0.0.0.127 area {self.ospf_area[(key, 0, 0)]}\n' if (key, 0, 0) in self.ip_address_assignment else ""
+                        startup_config += f' network {clean_string_ip_address(self.ip_address_assignment[(key, 0, 1)])} 0.0.0.127 area {self.ospf_area[(key, 0, 1)]}\n' if (key, 0, 1) in self.ip_address_assignment else ""
+                        startup_config += f' network {clean_string_ip_address(self.ip_address_assignment[(key, 1, 0)])} 0.0.0.127 area {self.ospf_area[(key, 1, 0)]}\n' if (key, 1, 0) in self.ip_address_assignment else ""
+                        startup_config += f' network {clean_string_ip_address(self.ip_address_assignment[(key, 2, 0)])} 0.0.0.127 area {self.ospf_area[(key, 2, 0)]}\n' if (key, 2, 0) in self.ip_address_assignment else ""
                         startup_config += f'ip forward-protocol nd\n'
                         startup_config += '!'
                     else:
@@ -1000,9 +1256,9 @@ class Configurator(object):
         # Dynamically allocate ip address.
         self.dynamic_address_allocation()
             
-    def configure_forwarding(self):
+    def configure_forwarding_metadata(self):
         '''
-        Configure the forwarding rules for a specific router.
+        Populate r2r_ports, r2r_ips, r2r_ips_dict, and router_cluster_leader that can be populated.    
         '''
         for key in self.adj:
             for conn in self.adj[key]:
@@ -1027,7 +1283,13 @@ class Configurator(object):
                             self.r2r_ips.add(self.ip_address_assignment[cluster_leader])
                             self.r2r_ips_dict[key].add(self.ip_address_assignment[(key, source_adapter, source_port)])
                             self.r2r_ips_dict[cluster_leader[0]].add(self.ip_address_assignment[cluster_leader])
-               
+        return
+
+
+    def configure_forwarding(self):
+        '''
+        Configure the forwarding rules for a specific router.
+        '''
         raw_edge_set = set()
         for conn in self.adj:
             source = conn
@@ -1114,7 +1376,6 @@ class Configurator(object):
                     visited_end_ip.add(clean_string_ip_address(r[0]))
                     temp_rules.add(r)
             fw_rules[i] = temp_rules
-            print('lalala', i, temp_rules)
 
         for router in fw_rules:
             destination_ips = collections.defaultdict(set)
@@ -1271,6 +1532,7 @@ class Configurator(object):
             # if we find a VPC in the subnet, we abort the operation and move on to another subnet.
             all_router_flag = True
             leader, largest_priority = None, 0
+            routers_in_local_router_cluster = set()
             for item in self.subnet_ip_dict[key]:
                 if isinstance(item, str) and self.node_dict[item][1] == 'vpcs':
                     all_router_flag = False
@@ -1290,9 +1552,12 @@ class Configurator(object):
                     if largest_local_priority > largest_priority:
                         leader = item
                         largest_priority = largest_local_priority
+                    routers_in_local_router_cluster.add(item)
                     
             if all_router_flag:
                 self.router_cluster_leader[key] = leader
+                for item in routers_in_local_router_cluster:
+                    self.router_cluster_lookup[item] = key
 
     def parse_links_and_nodes(self):
         links = self.file_config['topology']['links']

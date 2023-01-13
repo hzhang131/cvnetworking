@@ -108,17 +108,7 @@ def get_known_icons_from_image(img:np.ndarray, model_path:str):
                   [True, True, True]])
 
   masked_img[mask] = 255.0 # mask input img with the mask from model, with white color
-
-  # # delete this!
-  # for node in node_dicts:
-  #   pointUL = node["border"][0:2].astype(int)
-  #   pointLR = node["border"][2:4].astype(int)
-  #   print(pointUL)
-  #   masked_img = cv2.circle(masked_img, (pointUL[0],pointUL[1]), radius=5, color=(0, 0, 255), thickness=-1)
-  #   masked_img = cv2.circle(masked_img, (pointLR[0], pointLR[1]), radius=5, color=(0, 0, 255), thickness=-1)
-  #   masked_img = cv2.circle(masked_img, (node["center"][0], node["center"][1]), radius=node["radius"]+40, color=(0, 0, 255), thickness=1)
     
-
   return masked_img, node_dicts
 
 
