@@ -89,7 +89,8 @@ def text_process(img_path):
         node_dicts.append({
         "id":i,
         "pred_text": fixedname,
-        "border": border
+        "border": border,
+        "neighbor": []
         })
         path = os.path.join(ROOT, 'output/names')
         if not os.path.exists(path):
