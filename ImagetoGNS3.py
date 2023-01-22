@@ -410,7 +410,7 @@ def main():
       print(node_dicts)
       print(type(node_dicts[0]))
       InfotoGNS3.generate_gns3file(name, outputDir, node_dicts, adjacency_matrix)
-      configrator = InfotoGNS3.Configurator(outputDir+"/"+name+".gns3", outputDir)
+      configrator = InfotoGNS3.Configurator(outputDir+"/"+name+".gns3", outputDir, additional)
       configrator.configure_vpcs()
       configrator.configure_routers()
 if __name__ == "__main__":
