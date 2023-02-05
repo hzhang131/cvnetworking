@@ -39,6 +39,8 @@ class Configurator(object):
         self.backbone_size = None
         self.backbone_ABRs_ports = set()
         self.virtual_link_setup = collections.defaultdict(set)
+        if 'metadata' in self.flags:
+            return
         ###########################
         try:
             if os.path.exists(f'{self.config_parent}/project-files'):
