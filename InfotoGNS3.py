@@ -51,9 +51,9 @@ class Configurator(object):
         # For each (router, adaptor, port) combo, the ospf area defaults to 0 (unassigned).
         self.ospf_area = collections.defaultdict(int)
         self.configure_forwarding_metadata()
-        if 'ospf' not in self.flags:
+        if 'ospf' not in self.flags and 'eigrp' not in self.flags:
             self.configure_forwarding()
-        else:
+        elif 'eigrp' not in self.flags:
             self.backbone_size = input('\033[93m' + 'ACTION REQUIRED: Please input the max size for each area, positive integer greater than 1 only!\nIf you wish to include all routers into the backbone area, please type all\nYour current selection is: ' + '\033[0m')
             try:
                 self.backbone_size = int(self.backbone_size)
@@ -779,6 +779,19 @@ class Configurator(object):
                         startup_config += f' network {clean_string_ip_address(self.ip_address_assignment[(key, 2, 0)])} 0.0.0.127 area {self.ospf_area[(key, 2, 0)]}\n' if (key, 2, 0) in self.ip_address_assignment else ""
                         startup_config += f'ip forward-protocol nd\n'
                         startup_config += '!'
+                    elif 'eigrp' in self.flags:
+                        startup_config += 'router eigrp 101\n'
+                        # find subnets connect to this router and add to network
+                        if self.ip_address_assignment.get((key, 0, 0)) != None:
+                            startup_config += f' network {clean_string_ip_address(self.ip_address_assignment[(key, 0, 0)])} 0.0.0.127\n'
+                        if self.ip_address_assignment.get((key, 0, 1)) != None:
+                            startup_config += f' network {clean_string_ip_address(self.ip_address_assignment[(key, 0, 1)])} 0.0.0.127\n'
+                        if self.ip_address_assignment.get((key, 1, 0)) != None:
+                            startup_config += f' network {clean_string_ip_address(self.ip_address_assignment[(key, 1, 0)])} 0.0.0.127\n'
+                        if self.ip_address_assignment.get((key, 2, 0)) != None:
+                            startup_config += f' network {clean_string_ip_address(self.ip_address_assignment[(key, 2, 0)])} 0.0.0.127\n'
+                        startup_config += 'no auto-summary\n'
+                        startup_config += '!'
                     else:
                         for forward_info in self.forwarding_rules[key]:
                             outbound_packets_subnet, netmask, router_interface = forward_info
@@ -909,10 +922,12 @@ class Configurator(object):
                 # Here, i[1] is a dynamips
                 if (self.router_cluster_leader[i[0]], i[1]) not in token_edge_set and self.router_cluster_leader[i[0]][0] != i[1][0]:
                     token_edge_set.add((i[1], self.router_cluster_leader[i[0]]))
+                    print(self.router_cluster_leader[i[0]])
             elif second == 'ethernet_switch' and i[1] in self.router_cluster_leader:
                 # Here, i[0] is a dynamips
                 if (self.router_cluster_leader[i[1]], i[0]) not in token_edge_set and self.router_cluster_leader[i[1]][0] != i[0][0]:
                     token_edge_set.add((i[0], self.router_cluster_leader[i[1]]))
+                    print(self.router_cluster_leader[i[1]])
             else:
                 token_edge_set.add(i)
 

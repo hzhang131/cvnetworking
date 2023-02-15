@@ -1,6 +1,10 @@
 from email.policy import default
+from nis import match
 from socket import timeout
+from tokenize import Name
+from traceback import print_tb
 import gns3fy
+from itertools import cycle
 import time
 import sys
 import telnetlib
@@ -12,6 +16,7 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 import numpy as np
 from InfotoGNS3 import Configurator
+import json
 
 
 name = 'test4'
@@ -60,6 +65,9 @@ def process_project_files(pp_path):
     # Then reads the dynamips. (Considerably harder.)
 
     for dynamips_id in os.listdir(f'{pp_path}/dynamips'):
+        config_path = f'{pp_path}/dynamips/{dynamips_id}/configs'
+        if not os.path.isdir(config_path):
+            continue
         for file_name in os.listdir(f'{pp_path}/dynamips/{dynamips_id}/configs'):
             if 'private' in file_name:
                 fp = open(f'{pp_path}/dynamips/{dynamips_id}/configs/{file_name}', 'r')
@@ -75,7 +83,7 @@ def process_project_files(pp_path):
 
     return ip_set, ip_assignment
 
-def graph_results(sorted_device_names, matrix):
+def graph_adjacency_matrix(sorted_device_names, matrix):
     fig, ax = plt.subplots(figsize = (15, 15))
     im = ax.imshow(matrix)
 
@@ -97,9 +105,57 @@ def graph_results(sorted_device_names, matrix):
                         ha="center", va="center", color="w")
 
     ax.set_title("Average Trip Time Between Each Device Pair in Milliseconds.")
-    # fig.tight_layout()
     plt.savefig('ping_results.png')
     return 
+
+def graph_ospf_bar_chart(ospf_stt_path):
+    fig, ax = plt.subplots(figsize = (15, 15))
+    router_setup_times = {}
+    max_connection_per_router = 0
+    with open(ospf_stt_path, 'r') as f:
+        dictionary = json.loads(f.read())
+        for key in dictionary:
+            strings = sorted(dictionary[key], key = lambda x: x.split(', ')[1])
+            for string in strings:
+                time_list = re.findall(r'(?<=time: )[0-9|\:|\.]*', string)
+                preprocessed_time = time_list[0]
+                time_segments = preprocessed_time.split(':')
+                print(string, preprocessed_time, time_segments)
+                duration_in_ms = float(time_segments[0]) * 1000 * 3600 + float(time_segments[1]) * 1000 * 60 + float(time_segments[2]) * 1000
+                if key not in router_setup_times:
+                    router_setup_times[key] = []
+                router_setup_times[key].append(duration_in_ms)
+            max_connection_per_router = max(max_connection_per_router, len(router_setup_times[key]))
+
+
+    # draw it into a bar chart. 
+    devices = list(router_setup_times.keys())
+    y_pos = np.arange(len(devices))
+    last = None
+    cycol = cycle("bgrcmykw")
+    for i in range(max_connection_per_router):
+        batch = []
+        for router in devices:
+            if i >= len(router_setup_times[router]):
+                batch.append(0)
+            else:
+                batch.append(router_setup_times[router][i])
+        if last == None:
+            ax.barh(y_pos, batch, color=next(cycol))
+        else:
+            input_batch = [max(0, batch[i] - last[i]) for i in range(len(last))]
+            ax.barh(y_pos, input_batch, left = last, color=next(cycol))
+        last = batch
+    
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(devices, fontsize=12)
+    ax.set_xlabel('OSPF Setup Time in Milliseconds')
+    ax.set_title('OSPF Setup Time By Router')
+    plt.axvline(max(batch), color='red', ls='dotted', linewidth = 2.5)
+    plt.text(max(batch)+50,0,f'System Total OSPF Setup Time is {max(batch)/1000} seconds', rotation=90, color='blue')
+    plt.savefig('ospf_setup_time_chart.png')
+    return
+    
 
 def count_ospf_adjacencies(node_id, pp_path):
     '''
@@ -127,6 +183,7 @@ def count_ospf_adjacencies(node_id, pp_path):
 
     adj_count += len(conns)
     return adj_count
+
 
 def __main__():
     args = parse()
@@ -157,9 +214,9 @@ def __main__():
     print("\n")
 
     # Open the project
-    lab.open()
+    # lab.open()
     print('I need to sleep for some time!')
-    time.sleep(100)
+    time.sleep(110)
     print('I woke up!')
 
     # Verify the stats
@@ -167,7 +224,8 @@ def __main__():
     print("\n")
 
     # pre_stdout = sys.stdout
-    with open(f"../{NAME} result.txt", "w") as f:
+    ospf_record = {}
+    with open(f"../{NAME} result.txt", "w") as f, open(f"../{NAME} ospf time.json", "w") as t:
     # Read the names and status of all the nodes in the project
         print('here')
         for node in lab.nodes:
@@ -176,14 +234,35 @@ def __main__():
                 f.write("\n")
                 print(node.name + ":" + str(node.console))
                 if node.node_type == "dynamips" :
-                    end_bytes = b"gateway"
+                    end_bytes = b"cold start"
                     start = ("\r\n" ).encode('ascii')
                     telnetObj=telnetlib.Telnet(HOST,node.console)
-                    telnetObj.read_until(match=end_bytes, timeout=10)
+                    garbage = telnetObj.read_until(match=end_bytes, timeout=10)
+                    print("garbage in node " + node.name + ": \n")
+                    print(str(garbage))
+                    print("\n")
                     telnetObj.write(start)
+                    end_ospf = (node.name + "#").encode('ascii')
+                    ospf_time = (telnetObj.read_until(match = end_ospf, timeout=10)).decode("ascii")
+                    print("router " + node.name + " ospf setting:\n")
+                    lines = re.findall(r'00:.*?(?= on)', ospf_time)
+                    ospf_record[node.name] = []
+                    for line in lines:
+                        if 'Nbr' in line:
+                            time_nei = re.findall(r'[0-9]+:[0-9]+:[0-9]+.[0-9]+', line)
+                            neighbor = re.findall(r'(?<=Nbr )[0-9]+.[0-9]+.[0-9]+.[0-9]+', line)
+                            result = "neighbor: " + neighbor[0] + ", time: " + time_nei[0]
+                            ospf_record[node.name].append(result)
+                            print("neighbor: ")
+                            print(neighbor[0])
+                            print("\n")
+                            print("time: ")
+                            print(time_nei[0])
+                            print("\n")
+                    print("\n")
                 else:
                     telnetObj=telnetlib.Telnet(HOST,node.console)
-                    telnetObj.read_until(match=b"Loading Done", timeout=10)
+                    telnetObj.read_until(match=b"gateway", timeout=10)
         
                 for ip_to_ping in ip_set:
                     if node.node_type == 'dynamips':
@@ -214,10 +293,11 @@ def __main__():
                     time.sleep(0.2)
                 telnetObj.close()
             pass
+        t.write(json.dumps(ospf_record))
 
     # sys.stdout = pre_stdout
     # close the project, activate this line if then lab.open() at line 96 is activated
-    lab.close()
+    # lab.close()
 
 
 def compile_results(host, port, name):
@@ -331,7 +411,8 @@ def compile_results(host, port, name):
     '''
     TODO: Create another table that records the success rate. (By today)
     '''
-    graph_results(actual_sorted_names, matrix)
+    graph_adjacency_matrix(actual_sorted_names, matrix)
+    graph_ospf_bar_chart("../test4 ospf time.json")
     '''
     Design notes: 
     1. How do we handle timeouts?
@@ -345,15 +426,16 @@ Merge the main function and compile_results, remove any redundancy.
 These codes are poorly written, please spend some time to cleanup.
 '''
 # __main__()
-# _, ip_assignment = process_project_files('../project-files')
-# device_level_ip_assignment = {}
-# for key in ip_assignment:
-#     if isinstance(key, str):
-#         device_level_ip_assignment[ip_assignment[key].strip(' ')] = key
-#     elif isinstance(key, tuple):
-#         device_level_ip_assignment[ip_assignment[key].strip(' ')] = key[0]
 
-# compile_results('localhost', '3080', 'test4')
-id = 'dCd22b94-cB62-2b4b-7fb0-CdD46E5b8F6d'
-print(id, configurator.node_dict[id], count_ospf_adjacencies(id, '../project-files'))
+_, ip_assignment = process_project_files('../project-files')
+device_level_ip_assignment = {}
+for key in ip_assignment:
+    if isinstance(key, str):
+        device_level_ip_assignment[ip_assignment[key].strip(' ')] = key
+    elif isinstance(key, tuple):
+        device_level_ip_assignment[ip_assignment[key].strip(' ')] = key[0]
+compile_results('localhost', '3080', 'test4')
+
+# id = 'dCd22b94-cB62-2b4b-7fb0-CdD46E5b8F6d'
+# print(id, configurator.node_dict[id], count_ospf_adjacencies(id, '../project-files'))
 

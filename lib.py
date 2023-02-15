@@ -1,7 +1,11 @@
 import copy
 import json
+from multiprocessing import connection
+from ssl import ALERT_DESCRIPTION_BAD_CERTIFICATE_STATUS_RESPONSE
+from turtle import begin_fill, end_fill
 from xmlrpc.client import ProtocolError
 from distutils.command import clean
+from xmlrpc.server import CGIXMLRPCRequestHandler
 import numpy as np
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -817,3 +821,10 @@ def convert_ip_address_to_int(string_ip):
     string_ip_list = string_ip.split('.')
     v1, v2, v3, v4 = int(string_ip_list[0]), int(string_ip_list[1]), int(string_ip_list[2]), int(string_ip_list[3])
     return (v1 << 24) + (v2 << 16) + (v3 << 8) + v4
+
+def visualize_setup_time(boot_dict, node_dict, pp_path, mode):
+    '''
+    Given a boot dict of {node_id: [(neighbor ip address, setup time)...]}
+    We visualize another 2D matrix.
+    '''
+    pass
