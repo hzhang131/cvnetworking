@@ -39,6 +39,7 @@ class Configurator(object):
         self.backbone_size = None
         self.backbone_ABRs_ports = set()
         self.virtual_link_setup = collections.defaultdict(set)
+        self.graph = None
         if 'metadata' in self.flags:
             return
         ###########################
@@ -497,7 +498,6 @@ class Configurator(object):
                     else:
                         self.ospf_area[(key, 2, 0)] = inv_area_assignment[key]
 
-        # TODO: Set up virtual link.
         '''
         Algorithm:
         1. Find the Area border routers of backbone. 
@@ -511,6 +511,8 @@ class Configurator(object):
         border_router_ports = collections.defaultdict(set)
         dist_to_backbone = {BACKBONE: 0}
         areas = set(self.ospf_area.values())
+        area_adjacencies = collections.defaultdict(set)
+        interfaces_between_areas = collections.defaultdict(set)
         for a, b, c in self.ospf_area:
             for area in areas:
                 if a in area_routers_dict[area] and self.ospf_area[(a, b, c)] != area:
@@ -519,37 +521,66 @@ class Configurator(object):
                         dist_to_backbone[self.ospf_area[(a, b, c)]] = 1
                     # Establish adjacency.
                     border_router_ports[area].add((a, b, c))
+                    area_adjacencies[area].add(self.ospf_area[(a, b, c)])
+                    s_area, d_area = sorted([self.ospf_area[(a, b, c)], area])
+                    interfaces_between_areas[(s_area, d_area)].add((a, b, c))
+
                     
         '''
         We start assigning virtual-links from the peripheral areas.
         '''
-        for stem_area in peripheral_areas:
-            queue = [stem_area]
-            while queue:
-                transit_area = queue.pop(0)
-                for router_id, router_adaptor, router_port in border_router_ports[transit_area]:
-                    border_area = self.ospf_area[(router_id, router_adaptor, router_port)]
-                    if border_area not in peripheral_areas and border_area not in dist_to_backbone:
-                        # Connect the base area to the border area with a virtual-link.
-                        minimum_distance, destination_router_id = float('inf'), None
-                        for virtual_router_id, virtual_router_adaptor, virtual_router_port in border_router_ports[transit_area]:
-                            if (router_id, router_adaptor, router_port) != (virtual_router_id, virtual_router_adaptor, virtual_router_port):
-                                connection_area = self.ospf_area[(virtual_router_id, virtual_router_adaptor, virtual_router_port)]
-                                if connection_area in dist_to_backbone:
-                                    if dist_to_backbone[connection_area] < minimum_distance:
-                                        minimum_distance = dist_to_backbone[connection_area]
-                                        destination_router_id = virtual_router_id
-                        # At this stage, we should've determined the destination router, now what we can do here is stitch the routers together.
-                        # For each corresponding router, we store a set of tuples (transit_area: int, )
-                        self.virtual_link_setup[destination_router_id].add((transit_area, self.get_router_ospf_id(router_id)))
-                        self.virtual_link_setup[router_id].add((transit_area, self.get_router_ospf_id(destination_router_id)))
+        # for stem_area in peripheral_areas:
+        #     queue = [stem_area]
+        #     while queue:
+        #         transit_area = queue.pop(0)
+        #         for router_id, router_adaptor, router_port in border_router_ports[transit_area]:
+        #             border_area = self.ospf_area[(router_id, router_adaptor, router_port)]
+        #             if border_area not in peripheral_areas and border_area not in dist_to_backbone:
+        #                 # Connect the base area to the border area with a virtual-link.
+        #                 minimum_distance, destination_router_id = float('inf'), None
+        #                 for virtual_router_id, virtual_router_adaptor, virtual_router_port in border_router_ports[transit_area]:
+        #                     if (router_id, router_adaptor, router_port) != (virtual_router_id, virtual_router_adaptor, virtual_router_port):
+        #                         connection_area = self.ospf_area[(virtual_router_id, virtual_router_adaptor, virtual_router_port)]
+        #                         if connection_area in dist_to_backbone:
+        #                             if dist_to_backbone[connection_area] < minimum_distance:
+        #                                 minimum_distance = dist_to_backbone[connection_area]
+        #                                 destination_router_id = virtual_router_id
+        #                 # At this stage, we should've determined the destination router, now what we can do here is stitch the routers together.
+        #                 # For each corresponding router, we store a set of tuples (transit_area: int, )
+        #                 self.virtual_link_setup[destination_router_id].add((transit_area, self.get_router_ospf_id(router_id)))
+        #                 self.virtual_link_setup[router_id].add((transit_area, self.get_router_ospf_id(destination_router_id)))
 
-                        # Update border area's distance to the backbone area.
-                        # Add border area to queue. 
-                        dist_to_backbone[border_area] = minimum_distance + 1
-                        queue.append(border_area)
-             
-        
+        #                 # Update border area's distance to the backbone area.
+        #                 # Add border area to queue. 
+        #                 dist_to_backbone[border_area] = minimum_distance + 1
+        #                 queue.append(border_area)
+
+        ag = nx.Graph()
+        for s in area_adjacencies:
+            for d in area_adjacencies[s]:
+                ag.add_edge(s, d)
+
+        bypassed_area_triplets = set()
+        for area in areas:
+            best_path = nx.dijkstra_path(ag, source=area, target=0)
+            for index in range(len(best_path)-2):
+                source, transit, end = best_path[index], best_path[index+1], best_path[index+2]
+                if (source, transit, end) not in bypassed_area_triplets:
+                    bypassed_area_triplets.add((source, transit, end))
+                    shortest_path_distance, shortest_path = float('inf'), None
+                    # Find the shortest path between all routers in set (source, transit) and (transit, end). 
+                    # Then, we establish the shortest virtual-link between source and end.
+                    source_side_start, source_side_end = sorted([source, transit])
+                    dest_side_start, dest_side_end = sorted([transit, end])
+                    for source_router_id, sa, sp in interfaces_between_areas[(source_side_start, source_side_end)]:
+                        for dest_router_id, da, dp in interfaces_between_areas[(dest_side_start, dest_side_end)]:
+                            path_length = nx.dijkstra_path_length(self.graph, (source_router_id, sa, sp), (dest_router_id, da, dp))
+                            if path_length < shortest_path_distance:
+                                shortest_path_distance = path_length
+                                shortest_path = [source_router_id, dest_router_id]
+                    self.virtual_link_setup[shortest_path[1]].add((transit, self.get_router_ospf_id(shortest_path[0])))
+                    self.virtual_link_setup[shortest_path[0]].add((transit, self.get_router_ospf_id(shortest_path[1])))
+
         ospf_area_key_schedule = sorted(list(self.ospf_area.keys()))
         for a, b, c in ospf_area_key_schedule:
             print(f'{a}, {b}, {c} assigned to area: {self.ospf_area[(a, b, c)]}')
@@ -875,13 +906,7 @@ class Configurator(object):
                             self.r2r_ips.add(self.ip_address_assignment[cluster_leader])
                             self.r2r_ips_dict[key].add(self.ip_address_assignment[(key, source_adapter, source_port)])
                             self.r2r_ips_dict[cluster_leader[0]].add(self.ip_address_assignment[cluster_leader])
-        return
-
-
-    def configure_forwarding(self):
-        '''
-        Configure the forwarding rules for a specific router.
-        '''
+        
         raw_edge_set = set()
         for conn in self.adj:
             source = conn
@@ -931,10 +956,17 @@ class Configurator(object):
             else:
                 token_edge_set.add(i)
 
-        graph = nx.Graph()
-        nodes = self.ip_address_assignment.keys()
+        self.graph = nx.Graph()
         for e in token_edge_set:
-            graph.add_edge(e[0], e[1])
+            self.graph.add_edge(e[0], e[1])
+        return
+
+
+    def configure_forwarding(self):
+        '''
+        Configure the forwarding rules for a specific router.
+        '''
+        nodes = self.ip_address_assignment.keys()
 
         for start in nodes:
             if isinstance(start, tuple):
@@ -943,7 +975,7 @@ class Configurator(object):
                         end_ip = self.ip_address_assignment[end]
                         # We include router interface end ip addresses if no router ips have been assigned.
                         if True:
-                            path = nx.dijkstra_path(graph, source=start, target=end)
+                            path = nx.dijkstra_path(self.graph, source=start, target=end)
                             for idx in range(len(path)-1):
                                 if path[idx] in self.r2r_ports and path[idx+1] in self.r2r_ports:
                                     next_node_ip = self.ip_address_assignment[path[idx+1]]
