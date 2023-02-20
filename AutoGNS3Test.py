@@ -1,5 +1,4 @@
 from email.policy import default
-from nis import match
 from socket import timeout
 from tokenize import Name
 from traceback import print_tb
@@ -19,9 +18,6 @@ from InfotoGNS3 import Configurator
 import json
 
 
-name = 'test4'
-outputDir = '../'
-configurator = Configurator(f"../{name}.gns3", outputDir, {'metadata'})
 
 def parse():
     """
@@ -35,16 +31,20 @@ def parse():
     parser = argparse.ArgumentParser()
     parser.add_argument('--host', dest="host", type=str,
                         help='GNS3 server host address', default="localhost")
-    parser.add_argument('--port', dest="port", type=str,
+    parser.add_argument('-p','--port', dest="port", type=str,
                         help='GNS3 server port number', default="3080")
     # User either supplies a project name or a project id. 
-    parser.add_argument('--project-name', dest="name", type=str, 
+    parser.add_argument('-n','--project-name', dest="name", type=str, 
                         help='GNS3 project name')
-    parser.add_argument('--project-id', dest="id", type=str,
+    parser.add_argument('-i','--project-id', dest="id", type=str,
                         help='GNS3 project id')
-    parser.add_argument('--project-files-path', dest='pp_path', type=str, help='GNS3 project-files path', 
+    parser.add_argument('-f','--project-files-path', dest='pp_path', type=str, help='GNS3 project-files path', 
                         default='../project-files')
     # TODO: Support more user defined parameters.
+    parser.add_argument('-a','--addtional', dest="additional", type=str,
+                        help='Additional test argument', default="")
+    parser.add_argument('-o','--outputDir', dest="out", type=str,
+                        help='Output Directory', default="./")
 
     return parser.parse_args()
 
@@ -157,7 +157,7 @@ def graph_ospf_bar_chart(ospf_stt_path):
     return
     
 
-def count_ospf_adjacencies(node_id, pp_path):
+def count_ospf_adjacencies(node_id, pp_path, configurator):
     '''
     This function count the number of neighboring link state adjacencies.
     '''
@@ -184,7 +184,136 @@ def count_ospf_adjacencies(node_id, pp_path):
     adj_count += len(conns)
     return adj_count
 
+def compile_results(additional_type, host, port, gns3_path, name, device_level_ip_assignment):
+    if additional_type == 'eigrp':
+        # eigrp test output process
+        
+        return
+    elif additional_type == 'ospf':
+        res = {}
+        current_device = None
+        # Define the server object to establish the connection
+        gns3_server = gns3fy.Gns3Connector(f"http://{host}:{port}")
+        # Define the lab you want to load and assign the server connector
+        lab = gns3fy.Project(name=name, connector=gns3_server)
+        lab.get()
+        vpcs, dynamips = {}, {}
+        device_ids_to_names = {}
+        for node in lab.nodes:
+            if node.node_type == 'vpcs':
+                vpcs[node.name] = node.node_id
+            elif node.node_type == 'dynamips':
+                dynamips[node.name] = node.node_id
+            device_ids_to_names[node.node_id] = node.name
 
+        with open((gns3_path+"/"+name+" result.txt"), "r") as fp:
+            for _, line in enumerate(fp):
+                if line != '\n' and 'result' not in line: 
+                    # Name of the component.
+                    device_list = re.findall(r'(?<=)c_[0-9]+(?=:)', line)
+                    if device_list:
+                        current_device = device_list[0]
+
+                    if current_device != None and current_device in dynamips:        
+                        # dynamips metrics.
+                        dest_ip_list = re.findall(r'(?<=Echos to ).*?(?=,)', line)
+                        packet_number_list = re.findall(r'(?<=Sending ).*?(?=,)', line)
+                        byte_number_list = re.findall(r'(?<=, ).*?(?=-byte)', line)
+                        timeout_list = re.findall(r'(?<=is ).*?(?= seconds)', line)
+                        success_rate_list = re.findall(r'(?<=rate is ).*?(?= percent)', line)
+                        latency_list = re.findall(r'(?<=\= ).*?(?= ms)', line)
+                        if dest_ip_list and packet_number_list and byte_number_list and timeout_list and success_rate_list and latency_list:
+                            # For dynamips, each value holds (destination ip, number of packets, data size, 
+                            # timeout value in seconds, success rate, minimum time in ms, average time in ms, maximum time in ms)
+                            time_val = latency_list[0]
+                            minimum_time, average_time, maximum_time = time_val.split('/')
+                            minimum_time, average_time, maximum_time = int(minimum_time), int(average_time), int(maximum_time)
+                            if dynamips[current_device] not in res:
+                                res[dynamips[current_device]] = set()
+                            res[dynamips[current_device]].add((dest_ip_list[0].strip(' '), int(packet_number_list[0]), 
+                                                            int(byte_number_list[0]), int(timeout_list[0]), 
+                                                            int(success_rate_list[0])/100, minimum_time, average_time, maximum_time))
+
+                    elif current_device != None and current_device in vpcs:        
+                        # vpcs metrics.
+                        # TODO: strip extra space characters at start or end of ip address.
+                        dest_ip_list = re.findall(r'(?<=ping ).*?(?= -c)', line)
+                        # Number of packets.
+                        packet_number_list = re.findall(r'(?<=-c )[0-9]+(?=\\r)', line)
+                        # If the length of following data does not match the number of packets, then some of the packets may have timed out.
+                        byte_number_list = re.findall(r'(?<=\\n)[0-9]+(?= bytes)', line)
+                        ttl_list = re.findall(r'(?<=ttl=)[0-9]+(?= time)', line)
+                        trip_time_list = re.findall(r'(?<=time=)[0-9|\.]+(?= ms)', line)
+                        if dest_ip_list and packet_number_list and byte_number_list:
+                            local_tuple_list = []
+                            # For vpcs, the value fields a list of tuples.
+                            # Each tuple contains (destination_ip, byte_number, whole number ttl in milliseconds, float trip time in milliseconds)
+                            # If any given tuple times out or becomes unreachable, we fill in (destination_ip, byte_number, None, None)
+                            for ttl, trip_time in zip(ttl_list, trip_time_list):
+                                local_tuple_list.append((dest_ip_list[0].strip(' '), int(byte_number_list[0]), int(ttl), float(trip_time)))
+                            number_of_packets = int(packet_number_list[0])
+                            local_tuple_list = [(dest_ip_list[0].strip(' '), int(byte_number_list[0]), None, None) for _ in range(number_of_packets - len(local_tuple_list))] + local_tuple_list
+                            if vpcs[current_device] not in res:
+                                res[vpcs[current_device]] = []
+                            res[vpcs[current_device]].append(local_tuple_list)
+        
+        '''
+        TODO: This measurement roughly gives us a big picture, but it is not 100% precise.
+        '''
+        connection_pair_dict = defaultdict(set)
+        for key in res:
+            if isinstance(res[key], list):
+                dest_ip = None
+                for local_tuples in res[key]:
+                    # calculate average round trip time for now.
+                    trip_count = 0
+                    trip_aggregate_time = 0
+                    for local_tuple in local_tuples:
+                        dest_ip, byte_number, ttl_time, trip_time = local_tuple
+                        if ttl_time != None and trip_time != None:
+                            trip_count += 1
+                            trip_aggregate_time += trip_time
+                    average_trip_time = int(trip_aggregate_time/trip_count) if trip_count != 0 else int(float('inf'))
+                    sorted_pair_names = sorted([key, device_level_ip_assignment[dest_ip]])
+                    connection_pair_dict[(sorted_pair_names[0], sorted_pair_names[1])].add(average_trip_time)
+            else:
+                for local_tuple in res[key]:
+                    dest_ip, average_trip_time = local_tuple[0], local_tuple[-1]
+                    sorted_pair_names = sorted([key, device_level_ip_assignment[dest_ip]])
+                    connection_pair_dict[(sorted_pair_names[0], sorted_pair_names[1])].add(average_trip_time)
+                
+        # average all times in the dictionary and create a 2d numpy array.
+        sorted_device_names = sorted(list(set(device_level_ip_assignment.values())))
+        inverse_device_name_indexing = {}
+        for idx, name in enumerate(sorted_device_names):
+            inverse_device_name_indexing[name] = idx
+        
+        matrix = np.zeros((len(sorted_device_names), len(sorted_device_names)))
+        matrix = matrix
+        for connection_pair in connection_pair_dict:
+            device1, device2 = connection_pair
+            average_trip_time = sum(connection_pair_dict[connection_pair]) / len(connection_pair_dict[connection_pair])
+            matrix[inverse_device_name_indexing[device1], inverse_device_name_indexing[device2]] = round(average_trip_time, 1)
+            matrix[inverse_device_name_indexing[device2], inverse_device_name_indexing[device1]] = round(average_trip_time, 1)
+
+        actual_sorted_names = list(map(lambda x: device_ids_to_names[x], sorted_device_names))
+        '''
+        TODO: Create another table that records the success rate. (By today)
+        '''
+        graph_adjacency_matrix(actual_sorted_names, matrix)
+        graph_ospf_bar_chart("../test4 ospf time.json")
+        '''
+        Design notes: 
+        1. How do we handle timeouts?
+        2. How do we visualize results?
+        '''
+        return
+
+'''
+TODO for Sunday: 
+Merge the main function and compile_results, remove any redundancy.
+These codes are poorly written, please spend some time to cleanup.
+'''
 def __main__():
     args = parse()
     HOST = args.host
@@ -193,10 +322,20 @@ def __main__():
     PP_PATH = args.pp_path
     ID = args.id
     ip_set, ip_assignment = process_project_files(PP_PATH)
+    device_level_ip_assignment = {}
+    for key in ip_assignment:
+        if isinstance(key, str):
+            device_level_ip_assignment[ip_assignment[key].strip(' ')] = key
+        elif isinstance(key, tuple):
+            device_level_ip_assignment[ip_assignment[key].strip(' ')] = key[0]
+    ADD = args.additional
     if not HOST or not PORT:
         # TODO: Handle more garbage conditions.
         return
     # Define the server object to establish the connection
+    outputDir = args.out
+    gns_path = PP_PATH.split("/project-files")[0]
+    configurator = Configurator(f"{gns_path}/{NAME}.gns3", outputDir, {'metadata'})
     gns3_server = gns3fy.Gns3Connector(f"http://{HOST}:{PORT}")
 
     # Define the lab you want to load and assign the server connector
@@ -216,16 +355,15 @@ def __main__():
     # Open the project
     # lab.open()
     print('I need to sleep for some time!')
-    time.sleep(110)
+    time.sleep(100)
     print('I woke up!')
 
     # Verify the stats
     print(lab.stats)
     print("\n")
 
-    # pre_stdout = sys.stdout
-    ospf_record = {}
-    with open(f"../{NAME} result.txt", "w") as f, open(f"../{NAME} ospf time.json", "w") as t:
+    record = {}
+    with open(f"{outputDir}/{NAME} result.txt", "w") as f, open(f"{outputDir}/{NAME} {ADD} time.json", "w") as t:
     # Read the names and status of all the nodes in the project
         print('here')
         for node in lab.nodes:
@@ -234,32 +372,40 @@ def __main__():
                 f.write("\n")
                 print(node.name + ":" + str(node.console))
                 if node.node_type == "dynamips" :
-                    end_bytes = b"cold start"
+                    if ADD == 'ospf':
+                        end_bytes = b"cold start"
+                    elif ADD == 'eigrp':
+                        end_bytes = (f'{node.name}#').encode('ascii')
+                    else:
+                        end_bytes = b'cold start' # may change
                     start = ("\r\n" ).encode('ascii')
                     telnetObj=telnetlib.Telnet(HOST,node.console)
+                    if ADD == 'eigrp':
+                        telnetObj.write(start)
                     garbage = telnetObj.read_until(match=end_bytes, timeout=10)
                     print("garbage in node " + node.name + ": \n")
                     print(str(garbage))
                     print("\n")
-                    telnetObj.write(start)
-                    end_ospf = (node.name + "#").encode('ascii')
-                    ospf_time = (telnetObj.read_until(match = end_ospf, timeout=10)).decode("ascii")
-                    print("router " + node.name + " ospf setting:\n")
-                    lines = re.findall(r'00:.*?(?= on)', ospf_time)
-                    ospf_record[node.name] = []
-                    for line in lines:
-                        if 'Nbr' in line:
-                            time_nei = re.findall(r'[0-9]+:[0-9]+:[0-9]+.[0-9]+', line)
-                            neighbor = re.findall(r'(?<=Nbr )[0-9]+.[0-9]+.[0-9]+.[0-9]+', line)
-                            result = "neighbor: " + neighbor[0] + ", time: " + time_nei[0]
-                            ospf_record[node.name].append(result)
-                            print("neighbor: ")
-                            print(neighbor[0])
-                            print("\n")
-                            print("time: ")
-                            print(time_nei[0])
-                            print("\n")
-                    print("\n")
+                    if ADD == 'ospf':
+                        telnetObj.write(start)
+                        end_ospf = (node.name + "#").encode('ascii')
+                        ospf_time = (telnetObj.read_until(match = end_ospf, timeout=10)).decode("ascii")
+                        print("router " + node.name + " ospf setting:\n")
+                        lines = re.findall(r'00:.*?(?= on)', ospf_time)
+                        record[node.name] = []
+                        for line in lines:
+                            if 'Nbr' in line:
+                                time_nei = re.findall(r'[0-9]+:[0-9]+:[0-9]+.[0-9]+', line)
+                                neighbor = re.findall(r'(?<=Nbr )[0-9]+.[0-9]+.[0-9]+.[0-9]+', line)
+                                result = "neighbor: " + neighbor[0] + ", time: " + time_nei[0]
+                                record[node.name].append(result)
+                                print("neighbor: ")
+                                print(neighbor[0])
+                                print("\n")
+                                print("time: ")
+                                print(time_nei[0])
+                                print("\n")
+                        print("\n")
                 else:
                     telnetObj=telnetlib.Telnet(HOST,node.console)
                     telnetObj.read_until(match=b"gateway", timeout=10)
@@ -285,156 +431,32 @@ def __main__():
                         telnetObj.write(message)
                         output=str(telnetObj.read_until(match=b"xxxx",timeout=10))
                     
-                    f.write("node " + node.name + " ping " + ip_to_ping + " result:\n")
+                    f.write("node " + node.name + " ping " + ip_to_ping + " result:")
                     f.write(str(output))
-                    print("node " + node.name + " ping " + ip_to_ping + " result:\n")
+                    f.write('\n')
+                    print("node " + node.name + " ping " + ip_to_ping + " result:")
                     print(str(output))
-                    f.write("\n")
+                    print('\n')
                     time.sleep(0.2)
                 telnetObj.close()
             pass
-        t.write(json.dumps(ospf_record))
+        t.write(json.dumps(record))
 
-    # sys.stdout = pre_stdout
-    # close the project, activate this line if then lab.open() at line 96 is activated
+    # close the project, activate this line if then lab.open() is activated
     # lab.close()
+    compile_results(ADD, HOST, PORT, outputDir, NAME, device_level_ip_assignment)
 
 
-def compile_results(host, port, name):
-    res = {}
-    current_device = None
-    # Define the server object to establish the connection
-    gns3_server = gns3fy.Gns3Connector(f"http://{host}:{port}")
-    # Define the lab you want to load and assign the server connector
-    lab = gns3fy.Project(name=name, connector=gns3_server)
-    lab.get()
-    vpcs, dynamips = {}, {}
-    device_ids_to_names = {}
-    for node in lab.nodes:
-        if node.node_type == 'vpcs':
-            vpcs[node.name] = node.node_id
-        elif node.node_type == 'dynamips':
-            dynamips[node.name] = node.node_id
-        device_ids_to_names[node.node_id] = node.name
+__main__()
 
-    with open(("../"+name+" result.txt"), "r") as fp:
-        for _, line in enumerate(fp):
-            if line != '\n' and 'result' not in line: 
-                # Name of the component.
-                device_list = re.findall(r'(?<=)c_[0-9]+(?=:)', line)
-                if device_list:
-                    current_device = device_list[0]
-
-                if current_device != None and current_device in dynamips:        
-                    # dynamips metrics.
-                    dest_ip_list = re.findall(r'(?<=Echos to ).*?(?=,)', line)
-                    packet_number_list = re.findall(r'(?<=Sending ).*?(?=,)', line)
-                    byte_number_list = re.findall(r'(?<=, ).*?(?=-byte)', line)
-                    timeout_list = re.findall(r'(?<=is ).*?(?= seconds)', line)
-                    success_rate_list = re.findall(r'(?<=rate is ).*?(?= percent)', line)
-                    latency_list = re.findall(r'(?<=\= ).*?(?= ms)', line)
-                    if dest_ip_list and packet_number_list and byte_number_list and timeout_list and success_rate_list and latency_list:
-                        # For dynamips, each value holds (destination ip, number of packets, data size, 
-                        # timeout value in seconds, success rate, minimum time in ms, average time in ms, maximum time in ms)
-                        time_val = latency_list[0]
-                        minimum_time, average_time, maximum_time = time_val.split('/')
-                        minimum_time, average_time, maximum_time = int(minimum_time), int(average_time), int(maximum_time)
-                        if dynamips[current_device] not in res:
-                            res[dynamips[current_device]] = set()
-                        res[dynamips[current_device]].add((dest_ip_list[0].strip(' '), int(packet_number_list[0]), 
-                                                        int(byte_number_list[0]), int(timeout_list[0]), 
-                                                        int(success_rate_list[0])/100, minimum_time, average_time, maximum_time))
-
-                elif current_device != None and current_device in vpcs:        
-                    # vpcs metrics.
-                    # TODO: strip extra space characters at start or end of ip address.
-                    dest_ip_list = re.findall(r'(?<=ping ).*?(?= -c)', line)
-                    # Number of packets.
-                    packet_number_list = re.findall(r'(?<=-c )[0-9]+(?=\\r)', line)
-                    # If the length of following data does not match the number of packets, then some of the packets may have timed out.
-                    byte_number_list = re.findall(r'(?<=\\n)[0-9]+(?= bytes)', line)
-                    ttl_list = re.findall(r'(?<=ttl=)[0-9]+(?= time)', line)
-                    trip_time_list = re.findall(r'(?<=time=)[0-9|\.]+(?= ms)', line)
-                    if dest_ip_list and packet_number_list and byte_number_list:
-                        local_tuple_list = []
-                        # For vpcs, the value fields a list of tuples.
-                        # Each tuple contains (destination_ip, byte_number, whole number ttl in milliseconds, float trip time in milliseconds)
-                        # If any given tuple times out or becomes unreachable, we fill in (destination_ip, byte_number, None, None)
-                        for ttl, trip_time in zip(ttl_list, trip_time_list):
-                            local_tuple_list.append((dest_ip_list[0].strip(' '), int(byte_number_list[0]), int(ttl), float(trip_time)))
-                        number_of_packets = int(packet_number_list[0])
-                        local_tuple_list = [(dest_ip_list[0].strip(' '), int(byte_number_list[0]), None, None) for _ in range(number_of_packets - len(local_tuple_list))] + local_tuple_list
-                        if vpcs[current_device] not in res:
-                            res[vpcs[current_device]] = []
-                        res[vpcs[current_device]].append(local_tuple_list)
-    
-    '''
-    TODO: This measurement roughly gives us a big picture, but it is not 100% precise.
-    '''
-    connection_pair_dict = defaultdict(set)
-    for key in res:
-        if isinstance(res[key], list):
-            dest_ip = None
-            for local_tuples in res[key]:
-                # calculate average round trip time for now.
-                trip_count = 0
-                trip_aggregate_time = 0
-                for local_tuple in local_tuples:
-                    dest_ip, byte_number, ttl_time, trip_time = local_tuple
-                    if ttl_time != None and trip_time != None:
-                        trip_count += 1
-                        trip_aggregate_time += trip_time
-                average_trip_time = int(trip_aggregate_time/trip_count) if trip_count != 0 else int(float('inf'))
-                sorted_pair_names = sorted([key, device_level_ip_assignment[dest_ip]])
-                connection_pair_dict[(sorted_pair_names[0], sorted_pair_names[1])].add(average_trip_time)
-        else:
-            for local_tuple in res[key]:
-                dest_ip, average_trip_time = local_tuple[0], local_tuple[-1]
-                sorted_pair_names = sorted([key, device_level_ip_assignment[dest_ip]])
-                connection_pair_dict[(sorted_pair_names[0], sorted_pair_names[1])].add(average_trip_time)
-            
-    # average all times in the dictionary and create a 2d numpy array.
-    sorted_device_names = sorted(list(set(device_level_ip_assignment.values())))
-    inverse_device_name_indexing = {}
-    for idx, name in enumerate(sorted_device_names):
-        inverse_device_name_indexing[name] = idx
-    
-    matrix = np.zeros((len(sorted_device_names), len(sorted_device_names)))
-    matrix = matrix
-    for connection_pair in connection_pair_dict:
-        device1, device2 = connection_pair
-        average_trip_time = sum(connection_pair_dict[connection_pair]) / len(connection_pair_dict[connection_pair])
-        matrix[inverse_device_name_indexing[device1], inverse_device_name_indexing[device2]] = round(average_trip_time, 1)
-        matrix[inverse_device_name_indexing[device2], inverse_device_name_indexing[device1]] = round(average_trip_time, 1)
-
-    actual_sorted_names = list(map(lambda x: device_ids_to_names[x], sorted_device_names))
-    '''
-    TODO: Create another table that records the success rate. (By today)
-    '''
-    graph_adjacency_matrix(actual_sorted_names, matrix)
-    graph_ospf_bar_chart("../test4 ospf time.json")
-    '''
-    Design notes: 
-    1. How do we handle timeouts?
-    2. How do we visualize results?
-    '''
-    return
-
-'''
-TODO for Sunday: 
-Merge the main function and compile_results, remove any redundancy.
-These codes are poorly written, please spend some time to cleanup.
-'''
-# __main__()
-
-_, ip_assignment = process_project_files('../project-files')
-device_level_ip_assignment = {}
-for key in ip_assignment:
-    if isinstance(key, str):
-        device_level_ip_assignment[ip_assignment[key].strip(' ')] = key
-    elif isinstance(key, tuple):
-        device_level_ip_assignment[ip_assignment[key].strip(' ')] = key[0]
-compile_results('localhost', '3080', 'test4')
+# _, ip_assignment = process_project_files('../project-files')
+# device_level_ip_assignment = {}
+# for key in ip_assignment:
+#     if isinstance(key, str):
+#         device_level_ip_assignment[ip_assignment[key].strip(' ')] = key
+#     elif isinstance(key, tuple):
+#         device_level_ip_assignment[ip_assignment[key].strip(' ')] = key[0]
+# compile_results('localhost', '3080', 'test4')
 
 # id = 'dCd22b94-cB62-2b4b-7fb0-CdD46E5b8F6d'
 # print(id, configurator.node_dict[id], count_ospf_adjacencies(id, '../project-files'))
