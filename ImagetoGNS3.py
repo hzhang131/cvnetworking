@@ -385,14 +385,16 @@ def main():
       with open(list) as l:
         node_dicts = js.load(l)
       InfotoGNS3.generate_gns3file(name, outputDir, node_dicts, adjacency_matrix)
-      configrator = InfotoGNS3.Configurator(outputDir+"/"+name+".gns3", outputDir, additional)
-      configrator.configure_vpcs()
-      configrator.configure_routers()
+      configurator = InfotoGNS3.Configurator(outputDir+"/"+name+".gns3", outputDir, additional)
+      configurator.configure_vpcs()
+      configurator.configure_routers()
+      print(f'GNS3 file project id is: {configurator.project_id}')
     elif gns3_file != None:
       # input GNS3 topology file into configurator.
-      configrator = InfotoGNS3.Configurator(gns3_file, outputDir, additional)
-      configrator.configure_vpcs()
-      configrator.configure_routers()
+      configurator = InfotoGNS3.Configurator(gns3_file, outputDir, additional)
+      configurator.configure_vpcs()
+      configurator.configure_routers()
+      print(f'GNS3 file project id is: {configurator.project_id}')
     else:
       img = cv2.imread(user_img_path)
       scale_percent = int(1080/img.shape[1] * 100)
@@ -410,8 +412,9 @@ def main():
       print(node_dicts)
       print(type(node_dicts[0]))
       InfotoGNS3.generate_gns3file(name, outputDir, node_dicts, adjacency_matrix)
-      configrator = InfotoGNS3.Configurator(outputDir+"/"+name+".gns3", outputDir, additional)
-      configrator.configure_vpcs()
-      configrator.configure_routers()
+      configurator = InfotoGNS3.Configurator(outputDir+"/"+name+".gns3", outputDir, additional)
+      configurator.configure_vpcs()
+      configurator.configure_routers()
+      print(f'GNS3 file project id is: {configurator.project_id}')
 if __name__ == "__main__":
     main()

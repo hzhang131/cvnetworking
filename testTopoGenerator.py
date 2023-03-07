@@ -3,7 +3,7 @@ import os
 import argparse
 import random
 
-SET_NUM = 33
+SET_NUM = 20
 
 def generate_node_list(name):
     test_dir = './HugeTest/' + name
@@ -105,7 +105,7 @@ def parse():
       parser.parse_args object
     """
     parser = argparse.ArgumentParser()
-    parser.add_argument('--name', dest="name", type=str,
+    parser.add_argument('-n', '--name', dest="name", type=str,
                         help='testcase name')
 
     return parser.parse_args()

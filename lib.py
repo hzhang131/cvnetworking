@@ -2,6 +2,7 @@ import copy
 import json
 from multiprocessing import connection
 from ssl import ALERT_DESCRIPTION_BAD_CERTIFICATE_STATUS_RESPONSE
+from threading import currentThread
 from turtle import begin_fill, end_fill
 from xmlrpc.client import ProtocolError
 from distutils.command import clean
@@ -11,6 +12,7 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import collections
 from networkx.algorithms.traversal.depth_first_search import dfs_tree
+import itertools
 
 BACKBONE = 0
 ROUTER = 0
@@ -313,7 +315,7 @@ def generate_gns3file(name, GNS3dir, nodedicts:dict, adjacency, project_id="0e85
         "drawing_grid_size": drawing_grid_size,
         "grid_size": grid_size,
         "name": name,
-        "project_id": project_id,
+        "project_id": random_id_generator(),
         "revision": revision,
         "scene_height": scene_height,
         "scene_width": scene_width,
@@ -604,7 +606,7 @@ def generate_router_graph(conns, node_dict) -> nx.Graph:
     G = nx.Graph()
     for s, _, _, d, _, _ in conns:
         if node_dict[s][1] == 'dynamips' and node_dict[d][1] == 'dynamips':
-            G.add_edge(s, d)
+            G.add_edge(s, d, capacity=1)
     return G
 
 '''
@@ -674,85 +676,126 @@ def most_connected_node(G):
         adj[d].add(s)
     for node in adj:
         connectivity = len(adj[node])
-        max_conn_node = node if connectivity > max_conn_degree else max_conn_node
+        # max_conn_node = node if connectivity > max_conn_degree else max_conn_node
+        if connectivity > max_conn_degree:
+            max_conn_node = node
+        elif connectivity == max_conn_degree and node > max_conn_node:
+            max_conn_node = node
         max_conn_degree = max(max_conn_degree, connectivity)
     return max_conn_node
 
-def dfs(root, G, profile):
+def dfs(root, G, size):
     # First, convert all edges under root to be directed edges.
     # Construct a new directed tree. 
     # Then we use dfs_tree from nx's algorithm package to extract all nodes under.
-    adj = collections.defaultdict(set)
-    children = collections.defaultdict(set)
-    nG = nx.DiGraph()
+    adj = collections.defaultdict(list)
     for s, d in list(G.edges()):
-        adj[s].add(d)
-        adj[d].add(s)
+        adj[s].append(d)
+        adj[d].append(s)
         
+    for key in adj:
+        np.random.shuffle(adj[key])
+    
     queue, visited = [root], {root}
+    current_group = set()
+    group_assignment = []
     while queue:
         key = queue.pop(0)
+        node_connected_to_rest_of_group = False
+        for group_node in current_group:
+            if key in adj[group_node]:
+                node_connected_to_rest_of_group = True
+                break
+        node_connected_to_rest_of_group = node_connected_to_rest_of_group or not len(current_group)
+
+        if node_connected_to_rest_of_group and len(current_group) < size:
+            current_group.add(key)
+        else:
+            group_assignment.append(list(current_group))
+            current_group = set()
+            current_group.add(key)
+
         for child in adj[key]:
             if child not in visited:
-                children[key].add(child)
                 visited.add(child)
                 queue.append(child)
-                nG.add_edge(key, child)
-
     
-    for neigh in adj[root]:
-        profile[neigh] = set(dfs_tree(nG, neigh).nodes())
-    return
+    group_assignment.append(list(current_group))
+    return group_assignment
 
-def graph_partition(G, target_size, res, allocated_nodes):
-    T = nx.minimum_spanning_tree(G)
-    root = most_connected_node(T)
-    profile = collections.defaultdict(list)
-    if target_size >= len(G.nodes()):
-        res.append(set(G.nodes()))
-        return set(G.nodes())
-    dfs(root, T, profile)
-    profile_keys = list(profile.keys())
-    first_set, second_set = profile_keys[:len(profile_keys)//2], profile_keys[len(profile_keys)//2:]
-    first_set_nodes, second_set_nodes = set(), set()
-    for fs in first_set:
-        if fs != root:
-            first_set_nodes = first_set_nodes.union(set(profile[fs]))
+# def graph_partition_old(G, target_size, res, allocated_nodes):
+#     T = nx.minimum_spanning_tree(G)
+#     f = plt.figure()
+#     nx.draw(T, ax=f.add_subplot(111))
+#     f.savefig("Tree" + str(len(G.nodes())) + " graph.png")
+#     root = most_connected_node(T)
+#     profile = collections.defaultdict(list)
+#     if target_size >= len(G.nodes()):
+#         res.append(set(G.nodes()))
+#         return set(G.nodes())
+#     dfs(root, T, profile)
+#     profile_keys = list(profile.keys())
+#     first_set, second_set = profile_keys[:len(profile_keys)//2], profile_keys[len(profile_keys)//2:]
+#     first_set_nodes, second_set_nodes = set(), set()
+#     for fs in first_set:
+#         if fs != root:
+#             first_set_nodes = first_set_nodes.union(set(profile[fs]))
 
-    for ss in second_set:
-        if ss != root:
-            second_set_nodes = second_set_nodes.union(set(profile[ss]))
+#     for ss in second_set:
+#         if ss != root:
+#             second_set_nodes = second_set_nodes.union(set(profile[ss]))
     
-    # first_set_nodes, second_set_nodes = list(first_set_nodes), list(second_set_nodes)
-    # if len(first_set_nodes) <= len(second_set_nodes):
-    #     first_set_nodes.append(root)
-    # else:
-    #     second_set_nodes.append(root)
+#     # first_set_nodes, second_set_nodes = list(first_set_nodes), list(second_set_nodes)
+#     # if len(first_set_nodes) <= len(second_set_nodes):
+#     #     first_set_nodes.append(root)
+#     # else:
+#     #     second_set_nodes.append(root)
     
-    first_set_nodes.add(root)
-    second_set_nodes.add(root)
+#     first_set_nodes.add(root)
+#     second_set_nodes.add(root)
     
-    unassigned_first_set_nodes = first_set_nodes - first_set_nodes.intersection(allocated_nodes)
-    if len(unassigned_first_set_nodes) > target_size:
-        SG = G.subgraph(first_set_nodes)
-        allocated_nodes = graph_partition(SG, target_size, res, allocated_nodes)
+#     unassigned_first_set_nodes = first_set_nodes - first_set_nodes.intersection(allocated_nodes)
+#     if len(unassigned_first_set_nodes) > target_size:
+#         SG = G.subgraph(first_set_nodes)
+#         allocated_nodes = graph_partition(SG, target_size, res, allocated_nodes)
 
-    elif unassigned_first_set_nodes:
-        res.append(unassigned_first_set_nodes)
-        allocated_nodes = allocated_nodes.union(first_set_nodes)
+#     elif unassigned_first_set_nodes:
+#         res.append(unassigned_first_set_nodes)
+#         allocated_nodes = allocated_nodes.union(first_set_nodes)
 
-    unassigned_second_set_nodes = second_set_nodes - second_set_nodes.intersection(allocated_nodes)
-    if len(unassigned_second_set_nodes) > target_size:
-        SG = G.subgraph(second_set_nodes)
-        allocated_nodes = graph_partition(SG, target_size, res, allocated_nodes)
-    elif unassigned_second_set_nodes:
-        res.append(unassigned_second_set_nodes)
-        allocated_nodes = allocated_nodes.union(second_set_nodes)
-    return allocated_nodes
+#     unassigned_second_set_nodes = second_set_nodes - second_set_nodes.intersection(allocated_nodes)
+#     if len(unassigned_second_set_nodes) > target_size:
+#         SG = G.subgraph(second_set_nodes)
+#         allocated_nodes = graph_partition(SG, target_size, res, allocated_nodes)
+#     elif unassigned_second_set_nodes:
+#         res.append(unassigned_second_set_nodes)
+#         allocated_nodes = allocated_nodes.union(second_set_nodes)
+#     # print(allocated_nodes)
+#     return allocated_nodes
+
+import statistics
+def graph_partition(G, target_size, is_mst = False, root = None):
+    #T = nx.minimum_spanning_tree(G) if not is_mst else G
+    #root = most_connected_node(G) if root == None else root
+    
+    final_res_length = float('inf')
+    final_res = None
+    final_variance = float('inf')
+    for root in G.nodes():
+        res = dfs(root, G, target_size)
+        variance = statistics.variance(list(map(lambda x: len(x), res)))
+        if final_res_length > len(res):
+            final_res = res
+            final_res_length = len(res)
+            final_variance = variance
+        elif final_res_length == len(res) and variance < final_variance:
+            final_res = res
+            final_variance = variance
+    return final_res
+
 
 def graph_partition_wrapper(G, target_size):
-    res, allocated_nodes = [], set()
-    allocated_nodes = graph_partition(G, target_size, res, allocated_nodes)
+    res = graph_partition(G, target_size)
     connected_subgraphs = collections.defaultdict(set)
     node_group_assignment = {}
     incident_set = set()
@@ -783,8 +826,21 @@ def graph_partition_wrapper(G, target_size):
                     connected_subgraphs[node_group_assignment[node]].add(node_group_assignment[node_order[incident_node]])
                     connected_subgraphs[node_group_assignment[node_order[incident_node]]].add(node_group_assignment[node])
 
+    ############################# Ranking Pollution #############################
+    connected_subgraphs_graph = nx.Graph()
+    for group in connected_subgraphs:
+        for neighbor in connected_subgraphs[group]:
+            connected_subgraphs_graph.add_edge(group, neighbor)
+
+    center_groups = nx.center(connected_subgraphs_graph)
+    ARBITRARILY_LARGE_NUMBER = 1000000
+    ############################# Ranking Pollution #############################
+
     areas = []
     for i in connected_subgraphs:
+        votes = len(connected_subgraphs[i])
+        if i in center_groups:
+            votes += ARBITRARILY_LARGE_NUMBER
         areas.append((i, len(connected_subgraphs[i])))
     if connected_subgraphs: 
         areas = sorted(areas, key = lambda x: (-x[1], len(inv_node_group_assignment[x[0]])))
@@ -808,7 +864,7 @@ def graph_partition_wrapper(G, target_size):
                 print("ERRORRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR")
             inv_area_assignment[node] = ar
     
-    return area_assignment, inv_area_assignment, incident_set
+    return area_assignment, inv_area_assignment, incident_set, res
 
 def convert_int_to_ip_address(integer_ip):
     range1 = integer_ip >> 24

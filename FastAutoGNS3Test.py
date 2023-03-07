@@ -1,3 +1,4 @@
+from curses import meta
 from email.policy import default
 from socket import timeout
 from tokenize import Name
@@ -16,8 +17,8 @@ from collections import defaultdict
 import numpy as np
 from InfotoGNS3 import Configurator
 import json
-
-
+from multiprocessing import Pool
+from functools import partial
 
 def parse():
     """
@@ -304,7 +305,9 @@ def compile_results(additional_type, host, port, gns3_path, name, device_level_i
     actual_sorted_names = list(map(lambda x: device_ids_to_names[x], sorted_device_names))
 
     graph_adjacency_matrix(actual_sorted_names, matrix, name, additional_type, notes)
-    print(notes, np.mean(matrix))
+    print(notes, np.sum(matrix)/np.count_nonzero(matrix))
+    matrix_shape = matrix.shape[0]
+    print('unexpected zero time elements',  (matrix_shape * (matrix_shape - 1) - np.count_nonzero(matrix)) // 2) 
     # graph_ospf_bar_chart("../test4 ospf time.json")
     '''
     Design notes: 
@@ -318,15 +321,127 @@ TODO for Sunday:
 Merge the main function and compile_results, remove any redundancy.
 These codes are poorly written, please spend some time to cleanup.
 '''
+
+def extract_info(node,
+                global_host,
+                global_name,
+                global_notes,
+                global_add,
+                global_ip_assignment,
+                global_record,
+                global_ip_set,
+                global_outputDir):
+    with open(f"{global_outputDir}/{global_name} {global_add} {global_notes} result.txt", "a") as f:
+        if node.node_type == 'dynamips' or node.node_type == 'vpcs':
+            f.write(node.name + ":" + str(node.console))
+            f.write("\n")
+            #print(node.name + ":" + str(node.console))
+            if node.node_type == "dynamips" :
+                if global_add == 'ospf':
+                    end_bytes = b"cold start"
+                elif global_add == 'eigrp':
+                    end_bytes = (f'{node.name}#').encode('ascii')
+                else:
+                    end_bytes = b'cold start' # may change
+                start = ("\r\n" ).encode('ascii')
+                telnetObj=telnetlib.Telnet(global_host,node.console)
+                if global_add == 'eigrp':
+                    telnetObj.write(start)
+                garbage = telnetObj.read_until(match=end_bytes, timeout=10)
+                # print("garbage in node " + node.name + ": \n")
+                # print(str(garbage))
+                # print("\n")
+                if global_add == 'ospf':
+                    telnetObj.write(start)
+                    end_ospf = (node.name + "#").encode('ascii')
+                    ospf_time = (telnetObj.read_until(match = end_ospf, timeout=10)).decode("ascii")
+                    # print("router " + node.name + " ospf setting:\n")
+                    lines = re.findall(r'00:.*?(?= on)', ospf_time)
+                    global_record[node.name] = []
+                    for line in lines:
+                        if 'Nbr' in line:
+                            time_nei = re.findall(r'[0-9]+:[0-9]+:[0-9]+.[0-9]+', line)
+                            neighbor = re.findall(r'(?<=Nbr )[0-9]+.[0-9]+.[0-9]+.[0-9]+', line)
+                            result = "neighbor: " + neighbor[0] + ", time: " + time_nei[0]
+                            global_record[node.name].append(result)
+                            # print("neighbor: ")
+                            # print(neighbor[0])
+                            # print("\n")
+                            # print("time: ")
+                            # print(time_nei[0])
+                            # print("\n")
+                    # print("\n")
+                else:
+                    telnetObj.write(start)
+                    # print("router " + node.name + " eigrp setting:\n")
+                    lines = re.findall(r'00:.*?(?= up: new adjacency)', str(garbage))
+                    global_record[node.name] = []
+                    for line in lines:
+                        if 'Neighbor' in line:
+                            time_nei = re.findall(r'[0-9]+:[0-9]+:[0-9]+.[0-9]+', line)
+                            neighbor = re.findall(r'(?<=Neighbor )[0-9]+.[0-9]+.[0-9]+.[0-9]+', line)
+                            result = "neighbor: " + neighbor[0] + ", time: " + time_nei[0]
+                            global_record[node.name].append(result)
+                    #         print("neighbor: ")
+                    #         print(neighbor[0])
+                    #         print("\n")
+                    #         print("time: ")
+                    #         print(time_nei[0])
+                    #         print("\n")
+                    # print("\n")
+            else:
+                telnetObj=telnetlib.Telnet(global_host,node.console)
+                telnetObj.read_until(match=b"gateway", timeout=10)
+    
+            for ip_to_ping in global_ip_set:
+                if node.node_type == 'dynamips':
+                    if (node.node_id, 0, 0) in global_ip_assignment and global_ip_assignment[(node.node_id, 0, 0)] == ip_to_ping:
+                        continue
+                    if (node.node_id, 0, 1) in global_ip_assignment and global_ip_assignment[(node.node_id, 0, 1)] == ip_to_ping:
+                        continue
+                    if (node.node_id, 1, 0) in global_ip_assignment and global_ip_assignment[(node.node_id, 1, 0)] == ip_to_ping:
+                        continue
+                    if (node.node_id, 2, 0) in global_ip_assignment and global_ip_assignment[(node.node_id, 2, 0)] == ip_to_ping:
+                        continue
+                    message = ("ping " + ip_to_ping + " repeat 10\r\n" ).encode('ascii')
+                    telnetObj.write(message)
+                    output=str(telnetObj.read_until(match=b" ms",timeout=10))
+                elif node.node_type == "vpcs":
+                    if global_ip_assignment[node.node_id] == ip_to_ping:
+                        continue
+                    message = ("ping " + ip_to_ping + " -c 5\n" ).encode('ascii')
+                    telnetObj.write(message)
+                    output=str(telnetObj.read_until(match=b"xxxx",timeout=10))
+                
+                f.write("node " + node.name + " ping " + ip_to_ping + " result:")
+                f.write(str(output))
+                f.write('\n')
+                # print("node " + node.name + " ping " + ip_to_ping + " result:")
+                # print(str(output))
+                # print('\n')
+                time.sleep(1.5)
+            telnetObj.close()
+    return global_record
+
 def __main__():
+    boot_time = time.time()
+    from datetime import datetime
+    print(datetime.now())
     args = parse()
     HOST = args.host
+    global_host = HOST
     PORT = args.port
+    global_port = PORT
     NAME = args.name
+    global_name = NAME
     PP_PATH = args.pp_path
+    global_pp_path = PP_PATH
     ID = args.id
+    global_id = ID
     NOTES = args.notes
+    global_notes = NOTES
     ip_set, ip_assignment = process_project_files(PP_PATH)
+    global_ip_set, global_ip_assignment = ip_set, ip_assignment
     device_level_ip_assignment = {}
     for key in ip_assignment:
         if isinstance(key, str):
@@ -334,18 +449,20 @@ def __main__():
         elif isinstance(key, tuple):
             device_level_ip_assignment[ip_assignment[key].strip(' ')] = key[0]
     ADD = args.additional
+    global_add = ADD
     if not HOST or not PORT:
         # TODO: Handle more garbage conditions.
         return
     # Define the server object to establish the connection
     outputDir = args.out
+    global_outputDir = outputDir
     gns_path = PP_PATH.split("/project-files")[0]
     configurator = Configurator(f"{gns_path}/{NAME}.gns3", outputDir, {'metadata'})
     gns3_server = gns3fy.Gns3Connector(f"http://{HOST}:{PORT}")
 
     # Define the lab you want to load and assign the server connector
     lab = gns3fy.Project(name=NAME, connector=gns3_server)
-
+    global_lab = lab
     # Retrieve its information and display
     lab.get()
     print(lab)
@@ -367,119 +484,38 @@ def __main__():
     print(lab.stats)
     print("\n")
 
-    record = {}
+    global_record = {}
     with open(f"{outputDir}/{NAME} {ADD} {NOTES} result.txt", "w") as f, open(f"{outputDir}/{NAME} {ADD} {NOTES} time.json", "w") as t:
+        pass
     # Read the names and status of all the nodes in the project
-        for node in lab.nodes:
-            if node.node_type == 'dynamips' or node.node_type == 'vpcs':
-                f.write(node.name + ":" + str(node.console))
-                f.write("\n")
-                print(node.name + ":" + str(node.console))
-                if node.node_type == "dynamips" :
-                    if ADD == 'ospf':
-                        end_bytes = b"cold start"
-                    elif ADD == 'eigrp':
-                        end_bytes = (f'{node.name}#').encode('ascii')
-                    else:
-                        end_bytes = b'cold start' # may change
-                    start = ("\r\n" ).encode('ascii')
-                    telnetObj=telnetlib.Telnet(HOST,node.console)
-                    if ADD == 'eigrp':
-                        telnetObj.write(start)
-                    garbage = telnetObj.read_until(match=end_bytes, timeout=10)
-                    print("garbage in node " + node.name + ": \n")
-                    print(str(garbage))
-                    print("\n")
-                    if ADD == 'ospf':
-                        telnetObj.write(start)
-                        end_ospf = (node.name + "#").encode('ascii')
-                        ospf_time = (telnetObj.read_until(match = end_ospf, timeout=10)).decode("ascii")
-                        print("router " + node.name + " ospf setting:\n")
-                        lines = re.findall(r'00:.*?(?= on)', ospf_time)
-                        record[node.name] = []
-                        for line in lines:
-                            if 'Nbr' in line:
-                                time_nei = re.findall(r'[0-9]+:[0-9]+:[0-9]+.[0-9]+', line)
-                                neighbor = re.findall(r'(?<=Nbr )[0-9]+.[0-9]+.[0-9]+.[0-9]+', line)
-                                result = "neighbor: " + neighbor[0] + ", time: " + time_nei[0]
-                                record[node.name].append(result)
-                                print("neighbor: ")
-                                print(neighbor[0])
-                                print("\n")
-                                print("time: ")
-                                print(time_nei[0])
-                                print("\n")
-                        print("\n")
-                    else:
-                        telnetObj.write(start)
-                        print("router " + node.name + " eigrp setting:\n")
-                        lines = re.findall(r'00:.*?(?= up: new adjacency)', str(garbage))
-                        record[node.name] = []
-                        for line in lines:
-                            if 'Neighbor' in line:
-                                time_nei = re.findall(r'[0-9]+:[0-9]+:[0-9]+.[0-9]+', line)
-                                neighbor = re.findall(r'(?<=Neighbor )[0-9]+.[0-9]+.[0-9]+.[0-9]+', line)
-                                result = "neighbor: " + neighbor[0] + ", time: " + time_nei[0]
-                                record[node.name].append(result)
-                                print("neighbor: ")
-                                print(neighbor[0])
-                                print("\n")
-                                print("time: ")
-                                print(time_nei[0])
-                                print("\n")
-                        print("\n")
-                else:
-                    telnetObj=telnetlib.Telnet(HOST,node.console)
-                    telnetObj.read_until(match=b"gateway", timeout=10)
-        
-                for ip_to_ping in ip_set:
-                    if node.node_type == 'dynamips':
-                        if (node.node_id, 0, 0) in ip_assignment and ip_assignment[(node.node_id, 0, 0)] == ip_to_ping:
-                            continue
-                        if (node.node_id, 0, 1) in ip_assignment and ip_assignment[(node.node_id, 0, 1)] == ip_to_ping:
-                            continue
-                        if (node.node_id, 1, 0) in ip_assignment and ip_assignment[(node.node_id, 1, 0)] == ip_to_ping:
-                            continue
-                        if (node.node_id, 2, 0) in ip_assignment and ip_assignment[(node.node_id, 2, 0)] == ip_to_ping:
-                            continue
-                        message = ("ping " + ip_to_ping + " repeat 10\r\n" ).encode('ascii')
-                        telnetObj.write(message)
-                        output=str(telnetObj.read_until(match=b" ms",timeout=10))
-                    elif node.node_type == "vpcs":
-                        if ip_assignment[node.node_id] == ip_to_ping:
-                            continue
-                        message = ("ping " + ip_to_ping + " -c 5\n" ).encode('ascii')
-                        telnetObj.write(message)
-                        output=str(telnetObj.read_until(match=b"xxxx",timeout=10))
-                    
-                    f.write("node " + node.name + " ping " + ip_to_ping + " result:")
-                    f.write(str(output))
-                    f.write('\n')
-                    print("node " + node.name + " ping " + ip_to_ping + " result:")
-                    print(str(output))
-                    print('\n')
-                    time.sleep(0.5)
-                telnetObj.close()
-            pass
-        t.write(json.dumps(record))
+    pool = Pool(16)
+    global_res = pool.map(partial(extract_info, global_host=global_host,
+                                   global_name=global_name,
+                                   global_notes=global_notes,
+                                   global_add=global_add,
+                                   global_ip_assignment=global_ip_assignment,
+                                   global_record=global_record,
+                                   global_ip_set=global_ip_set,
+                                   global_outputDir=global_outputDir), lab.nodes)
+    pool.close()
+    pool.join()
+    with open(f"{outputDir}/{NAME} {ADD} {NOTES} time.json", "w") as t:
+        t.write(json.dumps(global_res, sort_keys=True, indent=4))
+    print(f'All Tests elapsed in {time.time() - boot_time}')
 
-    # close the project, activate this line if then lab.open() is activated
-    # lab.close()
     compile_results(ADD, HOST, PORT, outputDir, NAME, device_level_ip_assignment, NOTES)
 
+    ###########System Setup Time Report###########
+    string = ''
+    for res in global_res:
+        for key in res:
+            for metadata in res[key]:
+                query_res = re.findall(r'(?<=time: ).*', metadata)
+                if query_res:
+                    string = max(string, query_res[0])
 
+    print(f'System max converge time is {string}')
+    ################Report End#################
+
+    return
 __main__()
-
-# _, ip_assignment = process_project_files('../../../GNS3/projects/test4/project-files')
-# device_level_ip_assignment = {}
-# for key in ip_assignment:
-#     if isinstance(key, str):
-#         device_level_ip_assignment[ip_assignment[key].strip(' ')] = key
-#     elif isinstance(key, tuple):
-#         device_level_ip_assignment[ip_assignment[key].strip(' ')] = key[0]
-# compile_results('eigrp', 'localhost', '3080', '..', 'test4', device_level_ip_assignment, '202202231801')
-
-# id = 'dCd22b94-cB62-2b4b-7fb0-CdD46E5b8F6d'
-# print(id, configurator.node_dict[id], count_ospf_adjacencies(id, '../project-files'))
-
-''''''

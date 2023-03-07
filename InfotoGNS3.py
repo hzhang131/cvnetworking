@@ -1,10 +1,12 @@
 from gc import collect
 from re import L, S
 from threading import currentThread
-from turtle import distance
+# from turtle import distance
 from lib import *
 import os
 import shutil
+import statistics
+from tqdm import tqdm
 
 class Configurator(object):    
     def __init__(self, file_path, config_parent, args):
@@ -15,6 +17,7 @@ class Configurator(object):
         self.flags = args
         self.ip_address_assignment = {}
         self.netmask = 24
+        self.project_id = None
         ###########################
         self.adp_port_profile = collections.defaultdict(set)
         self.forwarding_table = collections.defaultdict(set)
@@ -40,6 +43,7 @@ class Configurator(object):
         self.backbone_ABRs_ports = set()
         self.virtual_link_setup = collections.defaultdict(set)
         self.graph = None
+        self.enable_auto_summary = None
         if 'metadata' in self.flags:
             return
         ###########################
@@ -66,9 +70,14 @@ class Configurator(object):
                     exit(-1)
             if self.backbone_size != 'all':
                 self.assign_ospf_area_wrapper()
+        else:
+            while True:
+                self.enable_auto_summary = input('\033[93m' + 'ACTION REQUIRED: Please input Y for auto route summary, N otherwise.\n' + '\033[0m')
+                if self.enable_auto_summary == 'Y' or self.enable_auto_summary == 'N':
+                    break
         ###########################
         
-    def assign_ospf_area_wrapper(self) -> None:
+    def assign_ospf_area_wrapper(self, retries = 200) -> None:
         conns = set()
         for key in self.adj:
             for conn in self.adj[key]:
@@ -88,7 +97,24 @@ class Configurator(object):
             adj[s].add(d)
             adj[d].add(s)
         
-        self.assign_ospf_area_balanced(conns, adj)
+        lowest_virtual_links_count = float('inf')
+        optimized_area_assignment, optimized_virtual_links_setup = None, None
+        conns_list = list(conns)
+        for _ in tqdm(range(retries)):
+            np.random.shuffle(conns_list)
+            self.assign_ospf_area_balanced(conns_list, adj)
+            local_count = 0
+            for key in self.virtual_link_setup:
+                local_count += len(self.virtual_link_setup[key])
+            if local_count < lowest_virtual_links_count:
+                lowest_virtual_links_count = local_count
+                optimized_area_assignment = self.ospf_area
+                optimized_virtual_links_setup = self.virtual_link_setup
+            else:
+                self.ospf_area, self.virtual_link_setup = collections.defaultdict(int), collections.defaultdict(set)
+        self.ospf_area = optimized_area_assignment
+        self.virtual_link_setup = optimized_virtual_links_setup
+        print(f'number of virtual links is {lowest_virtual_links_count}')
         return
 
     '''
@@ -402,8 +428,11 @@ class Configurator(object):
             # If there is no router connections AT ALL. Then, we have to group every router cluster to area 0.
             return
         # split routers into areas.
-        _, inv_area_assignment, incident_set = graph_partition_wrapper(G, self.backbone_size)
-        currently_assigned_area = max(list(inv_area_assignment.values())) + 1
+        _, inv_area_assignment, incident_set, res = graph_partition_wrapper(G, self.backbone_size)
+        # for idx, s in enumerate(res):
+        #     for node in s:
+        #         print("idx: ", idx, " - node:", self.node_dict[node][0])
+        # currently_assigned_area = max(list(inv_area_assignment.values())) + 1
         border_routers = set()
         area_router_count = collections.defaultdict(int)
         router_cluster_area = {}
@@ -421,6 +450,10 @@ class Configurator(object):
             port_lookup[(s, d)] = (s_adaptor, s_port, d_adaptor, d_port)
             port_usage[s].add((s_adaptor, s_port))
             port_usage[d].add((d_adaptor, d_port))
+
+        # print("===========================================================================")
+        # for key in inv_area_assignment:
+        #     print("router: ", self.node_dict[key][0], " in area ", inv_area_assignment[key])
         
         # If the connection is not with a router cluster, assign area accordingly.
         for router in inv_area_assignment:
@@ -434,6 +467,12 @@ class Configurator(object):
                     self.ospf_area[(router, 1, 0)] = inv_area_assignment[router]
                 elif (router, 2, 0) in self.r2r_ports:
                     self.ospf_area[(router, 2, 0)] = inv_area_assignment[router]
+        # print("===========================================================================")
+        # for key in inv_area_assignment:
+        #     print("router: ", self.node_dict[key][0], " port 0, 0: ", self.ospf_area[(key, 0, 0)])
+        #     print("router: ", self.node_dict[key][0], " port 0, 1: ", self.ospf_area[(key, 0, 1)])
+        #     print("router: ", self.node_dict[key][0], " port 1, 0: ", self.ospf_area[(key, 1, 0)])
+        #     print("router: ", self.node_dict[key][0], " port 2, 0: ", self.ospf_area[(key, 2, 0)])
 
         for r1, r2 in incident_set:
             if (r1, r2) in port_lookup:
@@ -452,6 +491,12 @@ class Configurator(object):
                 self.ospf_area[(r1, r1_adp, r1_port)] = inv_area_assignment[r1]
                 self.ospf_area[(r2, r2_adp, r2_port)] = inv_area_assignment[r1]
                 area_router_count[inv_area_assignment[r1]] += 2
+        # print("===========================================================================")
+        # for key in inv_area_assignment:
+        #     print("router: ", self.node_dict[key][0], " port 0, 0: ", self.ospf_area[(key, 0, 0)])
+        #     print("router: ", self.node_dict[key][0], " port 0, 1: ", self.ospf_area[(key, 0, 1)])
+        #     print("router: ", self.node_dict[key][0], " port 1, 0: ", self.ospf_area[(key, 1, 0)])
+        #     print("router: ", self.node_dict[key][0], " port 2, 0: ", self.ospf_area[(key, 2, 0)])
             
         # Fill in ports for router clusters.
         for r1, r2 in port_lookup:
@@ -472,6 +517,12 @@ class Configurator(object):
                 if self.node_dict[r1][1] == 'dynamips':
                     self.ospf_area[(r1, r1_adp, r1_port)] = router_cluster_area[s2]
                 self.ospf_area[(r2, r2_adp, r2_port)] = router_cluster_area[s2]
+        # print("===========================================================================")
+        # for key in inv_area_assignment:
+        #     print("router: ", self.node_dict[key][0], " port 0, 0: ", self.ospf_area[(key, 0, 0)])
+        #     print("router: ", self.node_dict[key][0], " port 0, 1: ", self.ospf_area[(key, 0, 1)])
+        #     print("router: ", self.node_dict[key][0], " port 1, 0: ", self.ospf_area[(key, 1, 0)])
+        #     print("router: ", self.node_dict[key][0], " port 2, 0: ", self.ospf_area[(key, 2, 0)])
 
         # Fill in remaining ports.
         for key in self.node_dict:            
@@ -497,6 +548,13 @@ class Configurator(object):
                         self.ospf_area[(key, 2, 0)] = router_cluster_area[self.router_cluster_lookup[key]]
                     else:
                         self.ospf_area[(key, 2, 0)] = inv_area_assignment[key]
+        # print("===========================================================================")
+        # for key in inv_area_assignment:
+        #     print("router: ", self.node_dict[key][0], " port 0, 0: ", self.ospf_area[(key, 0, 0)])
+        #     print("router: ", self.node_dict[key][0], " port 0, 1: ", self.ospf_area[(key, 0, 1)])
+        #     print("router: ", self.node_dict[key][0], " port 1, 0: ", self.ospf_area[(key, 1, 0)])
+        #     print("router: ", self.node_dict[key][0], " port 2, 0: ", self.ospf_area[(key, 2, 0)])
+        # print()
 
         '''
         Algorithm:
@@ -513,19 +571,43 @@ class Configurator(object):
         areas = set(self.ospf_area.values())
         area_adjacencies = collections.defaultdict(set)
         interfaces_between_areas = collections.defaultdict(set)
-        for a, b, c in self.ospf_area:
-            for area in areas:
-                if a in area_routers_dict[area] and self.ospf_area[(a, b, c)] != area:
-                    if area == 0:
-                        peripheral_areas.add(self.ospf_area[(a, b, c)])
-                        dist_to_backbone[self.ospf_area[(a, b, c)]] = 1
-                    # Establish adjacency.
-                    border_router_ports[area].add((a, b, c))
-                    area_adjacencies[area].add(self.ospf_area[(a, b, c)])
-                    s_area, d_area = sorted([self.ospf_area[(a, b, c)], area])
-                    interfaces_between_areas[(s_area, d_area)].add((a, b, c))
+        ABR_interfaces_between_areas = collections.defaultdict(set)
 
-                    
+        # ABR_interface_between_areas
+        '''
+        # (area_1, area_2) returns all interfaces in area_1
+        # (area_2, area_1) returns all interfaces in area_2
+        '''
+        for a, b, c in self.ospf_area:
+            # for area in areas:
+                # if a in area_routers_dict[area] and self.ospf_area[(a, b, c)] != area:
+                #     if area == 0:
+                #         peripheral_areas.add(self.ospf_area[(a, b, c)])
+                #         dist_to_backbone[self.ospf_area[(a, b, c)]] = 1
+                #     # Establish adjacency.
+                #     border_router_ports[area].add((a, b, c))
+                #     area_adjacencies[area].add(self.ospf_area[(a, b, c)])
+                #     s_area, d_area = sorted([self.ospf_area[(a, b, c)], area])
+                #     interfaces_between_areas[(s_area, d_area)].add((a, b, c))
+            current_area = self.ospf_area[(a, b, c)]
+            if (a, 0, 0) in self.ospf_area and self.ospf_area[(a, 0, 0)] != current_area:
+                ABR_interfaces_between_areas[(self.ospf_area[(a, 0, 0)], current_area)].add((a, 0, 0))
+                area_adjacencies[current_area].add(self.ospf_area[(a, 0, 0)])
+                area_adjacencies[self.ospf_area[(a, 0, 0)]].add(current_area)
+            if (a, 0, 1) in self.ospf_area and self.ospf_area[(a, 0, 1)] != current_area:
+                ABR_interfaces_between_areas[(self.ospf_area[(a, 0, 1)], current_area)].add((a, 0, 1))
+                area_adjacencies[current_area].add(self.ospf_area[(a, 0, 1)])
+                area_adjacencies[self.ospf_area[(a, 0, 1)]].add(current_area)
+            if (a, 1, 0) in self.ospf_area and self.ospf_area[(a, 1, 0)] != current_area:
+                ABR_interfaces_between_areas[(self.ospf_area[(a, 1, 0)], current_area)].add((a, 1, 0))
+                area_adjacencies[current_area].add(self.ospf_area[(a, 1, 0)])
+                area_adjacencies[self.ospf_area[(a, 1, 0)]].add(current_area)
+            if (a, 2, 0) in self.ospf_area and self.ospf_area[(a, 2, 0)] != current_area:
+                ABR_interfaces_between_areas[(self.ospf_area[(a, 2, 0)], current_area)].add((a, 2, 0))
+                area_adjacencies[current_area].add(self.ospf_area[(a, 2, 0)])
+                area_adjacencies[self.ospf_area[(a, 2, 0)]].add(current_area)
+
+        # print(ABR_interfaces_between_areas.keys())
         '''
         We start assigning virtual-links from the peripheral areas.
         '''
@@ -561,34 +643,85 @@ class Configurator(object):
                 ag.add_edge(s, d)
 
         bypassed_area_triplets = set()
+        # print(areas)
         for area in areas:
             best_path = nx.dijkstra_path(ag, source=area, target=0)
-            for index in range(len(best_path)-2):
-                source, transit, end = best_path[index], best_path[index+1], best_path[index+2]
-                if (source, transit, end) not in bypassed_area_triplets:
-                    bypassed_area_triplets.add((source, transit, end))
-                    shortest_path_distance, shortest_path = float('inf'), None
+            # print('+++++++++++++++++++++++++++++++best path++++++++++++++++++++++\n', area, 0, best_path)
+            # for index in range(len(best_path)-2):
+                # source, transit, end = best_path[index], best_path[index+1], best_path[index+2]
+                # if (source, transit, end) not in bypassed_area_triplets:
+                    # bypassed_area_triplets.add((source, transit, end))
+                    # shortest_path_distance, shortest_path = float('inf'), None
                     # Find the shortest path between all routers in set (source, transit) and (transit, end). 
                     # Then, we establish the shortest virtual-link between source and end.
-                    source_side_start, source_side_end = sorted([source, transit])
-                    dest_side_start, dest_side_end = sorted([transit, end])
-                    for source_router_id, sa, sp in interfaces_between_areas[(source_side_start, source_side_end)]:
-                        for dest_router_id, da, dp in interfaces_between_areas[(dest_side_start, dest_side_end)]:
-                            path_length = nx.dijkstra_path_length(self.graph, (source_router_id, sa, sp), (dest_router_id, da, dp))
-                            if path_length < shortest_path_distance:
-                                shortest_path_distance = path_length
-                                shortest_path = [source_router_id, dest_router_id]
-                    self.virtual_link_setup[shortest_path[1]].add((transit, self.get_router_ospf_id(shortest_path[0])))
-                    self.virtual_link_setup[shortest_path[0]].add((transit, self.get_router_ospf_id(shortest_path[1])))
+                    # source_side_start, source_side_end = sorted([source, transit])
+                    # dest_side_start, dest_side_end = sorted([transit, end])
+                    # for source_router_id, sa, sp in interfaces_between_areas[(source_side_start, source_side_end)]:
+                    #     for dest_router_id, da, dp in interfaces_between_areas[(dest_side_start, dest_side_end)]:
+                    #         path_length = nx.dijkstra_path_length(self.graph, (source_router_id, sa, sp), (dest_router_id, da, dp))
+                    #         if path_length < shortest_path_distance:
+                    #             shortest_path_distance = path_length
+                    #             shortest_path = [source_router_id, dest_router_id]
+                    # self.virtual_link_setup[shortest_path[1]].add((transit, self.get_router_ospf_id(shortest_path[0])))
+                    # self.virtual_link_setup[shortest_path[0]].add((transit, self.get_router_ospf_id(shortest_path[1])))
+            if len(best_path) >= 3:
+                shortest_path_distance, shortest_path = float('inf'), None
+                start, after_start, before_end, end = best_path[0], best_path[1], best_path[~1], best_path[~0]
+                # source_side_start, source_side_end = sorted([start, after_start])
+                # dest_side_start, dest_side_end = sorted([before_end, end])
+                # for source_router_id, sa, sp in ABR_interfaces_between_areas[(source_side_start, source_side_end)]:
+                #     for dest_router_id, da, dp in ABR_interfaces_between_areas[(dest_side_start, dest_side_end)]:
+                # print('heuristic seq, not necessarily the path routers end up taking\n', start, after_start, before_end, end)
+                for source_router_id, sa, sp in ABR_interfaces_between_areas[(start, after_start)]:
+                    for dest_router_id, da, dp in ABR_interfaces_between_areas[(end, before_end)]:
+                        path_length = nx.dijkstra_path_length(self.graph, (source_router_id, sa, sp), (dest_router_id, da, dp))
+                        if path_length < shortest_path_distance:
+                            shortest_path_distance = path_length
+                            shortest_path = [(source_router_id, sa, sp), (dest_router_id, da, dp)]
 
+                sri, dri = shortest_path
+                interim_routers = nx.dijkstra_path(self.graph, source=sri, target=dri)
+                start_router_interface = interim_routers[0]
+                # start_area = start
+                # transit_area = after_start
+                start_area, transit_area = None, None
+                for i in interim_routers:
+                    # print(self.ospf_area[i], self.node_dict[i[0]][0])
+                    if start_area == None:
+                        start_area = self.ospf_area[i]
+                    elif start_area != None and transit_area == None and start_area != self.ospf_area[i]:
+                        transit_area = self.ospf_area[i]
+                # print()
+                for router_id in range(1, len(interim_routers)):
+                    router_interface = interim_routers[router_id]
+                    # If this router is an ABR, we shift to the next connected OSPF area.
+                    if self.ospf_area[router_interface] != transit_area and start_router_interface[0] != router_interface[0]:
+                        # print(f'source {self.node_dict[sri[0]]}, target {self.node_dict[dri[0]]}')
+                        # print(self.node_dict[start_router_interface[0]][0], self.node_dict[router_interface[0]][0], transit_area)
+                        next_area = self.ospf_area[router_interface]
+                        # print(next_area)
+                        if (start_router_interface[0], transit_area, router_interface[0]) not in bypassed_area_triplets and \
+                            (router_interface[0], transit_area, start_router_interface[0]) not in bypassed_area_triplets \
+                                and start_area != next_area:
+                            # print('the three areas', start_area, transit_area, next_area)
+                            bypassed_area_triplets.add((start_router_interface[0], transit_area, router_interface[0]))
+                            self.virtual_link_setup[start_router_interface[0]].add((transit_area, self.get_router_ospf_id(router_interface[0])))
+                            self.virtual_link_setup[router_interface[0]].add((transit_area, self.get_router_ospf_id(start_router_interface[0])))
+                        if start_area != next_area:
+                            start_area, transit_area, next_area = transit_area, next_area, None                            
+                        start_router_interface = router_interface
+                            
         ospf_area_key_schedule = sorted(list(self.ospf_area.keys()))
-        for a, b, c in ospf_area_key_schedule:
-            print(f'{a}, {b}, {c} assigned to area: {self.ospf_area[(a, b, c)]}')
-        print()
+        # for a, b, c in ospf_area_key_schedule:
+        #     print(f'{a}, {b}, {c} assigned to area: {self.ospf_area[(a, b, c)]}')
+        # print()
+        number_of_virtual_links = 0
         ospf_border_router_schedule = sorted(list(self.virtual_link_setup.keys()))
-        for router_id in ospf_border_router_schedule:
-            for transit_area, dest_ospf_router_id in self.virtual_link_setup[router_id]:
-                print(f'router: {router_id}, transit_area: {transit_area}, destination ospf router id: {dest_ospf_router_id}')
+        # for router_id in ospf_border_router_schedule:
+        #     for transit_area, dest_ospf_router_id in self.virtual_link_setup[router_id]:
+        #         print(f'router: {router_id}, transit_area: {transit_area}, destination ospf router id: {dest_ospf_router_id}')
+        #         number_of_virtual_links += 1
+        # print(f'number of virtual links: {number_of_virtual_links}')
         return
 
     def get_router_ospf_id(self, router_id) -> str:
@@ -676,19 +809,19 @@ class Configurator(object):
         Configure router settings and other settings, mostly used on routers.
         '''
         if not os.path.exists(f'{self.config_parent}/project-files'):
-            print(os.mkdir(f'{self.config_parent}/project-files', 0o777))
+            os.mkdir(f'{self.config_parent}/project-files', 0o777)
             
         if not os.path.exists(f'{self.config_parent}/project-files/dynamips'):
-            print(os.mkdir(f'{self.config_parent}/project-files/dynamips', 0o777))   
+            os.mkdir(f'{self.config_parent}/project-files/dynamips', 0o777)
             
         for raw_key in self.ip_address_assignment:
             key = raw_key if isinstance(raw_key, str) else raw_key[0]
             if self.node_dict[key][1] == 'dynamips': 
                 if not os.path.exists(f'{self.config_parent}/project-files/dynamips/{key}'):
-                    print(os.mkdir(f'{self.config_parent}/project-files/dynamips/{key}', 0o777))
+                    os.mkdir(f'{self.config_parent}/project-files/dynamips/{key}', 0o777)
                 if not os.path.exists(f'{self.config_parent}/project-files/dynamips/{key}/configs'):
-                    print(os.mkdir(f'{self.config_parent}/project-files/dynamips/{key}/configs', 0o777))
-                
+                    os.mkdir(f'{self.config_parent}/project-files/dynamips/{key}/configs', 0o777)
+            
 
                 # TODO: IMPORTANT!!!!!! Change naming rules if you are directly using an imported gns3 topology file.
                 index_number = int((self.node_dict[key][0].split('_'))[1])+10
@@ -821,7 +954,8 @@ class Configurator(object):
                             startup_config += f' network {clean_string_ip_address(self.ip_address_assignment[(key, 1, 0)])} 0.0.0.127\n'
                         if self.ip_address_assignment.get((key, 2, 0)) != None:
                             startup_config += f' network {clean_string_ip_address(self.ip_address_assignment[(key, 2, 0)])} 0.0.0.127\n'
-                        startup_config += 'no auto-summary\n'
+                        if self.enable_auto_summary == 'N':
+                            startup_config += 'no auto-summary\n'
                         startup_config += '!'
                     else:
                         for forward_info in self.forwarding_rules[key]:
@@ -908,6 +1042,9 @@ class Configurator(object):
                             self.r2r_ips_dict[cluster_leader[0]].add(self.ip_address_assignment[cluster_leader])
         
         raw_edge_set = set()
+        ##############################
+        intra_conns = set()
+        ##############################
         for conn in self.adj:
             source = conn
             for dest_info in self.adj[conn]:
@@ -917,6 +1054,9 @@ class Configurator(object):
                         if dest_info[3] != profile[0] or dest_info[0] != profile[1]:
                             if ((source[0], profile[0], profile[1]), source) not in raw_edge_set:
                                 raw_edge_set.add((source, (source[0], profile[0], profile[1])))
+                                ##############################
+                                intra_conns.add((source, (source[0], profile[0], profile[1])))
+                                ##############################
                             
                 dest = dest_info[1]
                 if self.node_dict[dest][1] == 'dynamips':
@@ -925,6 +1065,9 @@ class Configurator(object):
                         if dest_info[4] != profile[0] or dest_info[2] != profile[1]:
                             if ((dest[0], profile[0], profile[1]), dest) not in raw_edge_set:
                                 raw_edge_set.add((dest, (dest[0], profile[0], profile[1])))
+                                ##############################
+                                intra_conns.add((dest, (dest[0], profile[0], profile[1])))
+                                ##############################
                 
                 if (dest, source) not in raw_edge_set:
                     raw_edge_set.add((source, dest))
@@ -958,7 +1101,11 @@ class Configurator(object):
 
         self.graph = nx.Graph()
         for e in token_edge_set:
-            self.graph.add_edge(e[0], e[1])
+            if e not in intra_conns:
+                self.graph.add_edge(e[0], e[1], weight=1)
+            else:
+                self.graph.add_edge(e[0], e[1], weight=0.01)
+
         return
 
 
@@ -1016,17 +1163,17 @@ class Configurator(object):
         # print(self.ip_address_assignment)
         # Check whether there is a project-file folder in source parent.
         if not os.path.exists(f'{self.config_parent}/project-files'):
-            print(os.mkdir(f'{self.config_parent}/project-files', 0o777))
+            os.mkdir(f'{self.config_parent}/project-files', 0o777)
             
         if not os.path.exists(f'{self.config_parent}/project-files/vpcs'):
-            print(os.mkdir(f'{self.config_parent}/project-files/vpcs', 0o777))    
+            os.mkdir(f'{self.config_parent}/project-files/vpcs', 0o777)   
             
         for raw_key in self.ip_address_assignment:
             key = raw_key if isinstance(raw_key, str) else raw_key[0]
             # print('within configure_vpcs ', raw_key, key, self.node_dict[key][1])
             if self.node_dict[key][1] == 'vpcs': 
                 if not os.path.exists(f'{self.config_parent}/project-files/vpcs/{key}'):
-                    print(os.mkdir(f'{self.config_parent}/project-files/vpcs/{key}', 0o777))
+                    os.mkdir(f'{self.config_parent}/project-files/vpcs/{key}', 0o777)
                 with open(f'{self.config_parent}/project-files/vpcs/{key}/startup.vpc', 'w') as f:
                     # print(f'configuring {key}')
                     f.write(f'set pcname {self.node_dict[key][0]}\n')
@@ -1164,6 +1311,7 @@ class Configurator(object):
     def parse_links_and_nodes(self):
         links = self.file_config['topology']['links']
         nodes = self.file_config['topology']['nodes']
+        self.project_id = self.file_config['project_id']
         node_dict = {}
         adj = collections.defaultdict(set)
         for n in nodes:
