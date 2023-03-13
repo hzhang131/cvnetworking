@@ -7,9 +7,10 @@ import os
 import shutil
 import statistics
 from tqdm import tqdm
+from copy import copy
 
 class Configurator(object):    
-    def __init__(self, file_path, config_parent, args):
+    def __init__(self, file_path, config_parent, args, size, auto_sum):
         self.file_path = file_path
         self.config_parent = config_parent
         with open(self.file_path, "r") as f:
@@ -44,6 +45,8 @@ class Configurator(object):
         self.virtual_link_setup = collections.defaultdict(set)
         self.graph = None
         self.enable_auto_summary = None
+        self.ospf_area_size = size
+        self.eigrp_auto_sum = auto_sum
         if 'metadata' in self.flags:
             return
         ###########################
@@ -59,7 +62,10 @@ class Configurator(object):
         if 'ospf' not in self.flags and 'eigrp' not in self.flags:
             self.configure_forwarding()
         elif 'eigrp' not in self.flags:
-            self.backbone_size = input('\033[93m' + 'ACTION REQUIRED: Please input the max size for each area, positive integer greater than 1 only!\nIf you wish to include all routers into the backbone area, please type all\nYour current selection is: ' + '\033[0m')
+            if not self.ospf_area_size:
+                self.backbone_size = input('\033[93m' + 'ACTION REQUIRED: Please input the max size for each area, positive integer greater than 1 only!\nIf you wish to include all routers into the backbone area, please type all\nYour current selection is: ' + '\033[0m')
+            else:
+                self.backbone_size = self.ospf_area_size
             try:
                 self.backbone_size = int(self.backbone_size)
                 if self.backbone_size < 2:
@@ -68,16 +74,23 @@ class Configurator(object):
                 if self.backbone_size != 'all':
                     print('\033[91m' + str(e) + '\033[0m')
                     exit(-1)
+                
             if self.backbone_size != 'all':
                 self.assign_ospf_area_wrapper()
         else:
+            bad_eigrp_arg = False
             while True:
-                self.enable_auto_summary = input('\033[93m' + 'ACTION REQUIRED: Please input Y for auto route summary, N otherwise.\n' + '\033[0m')
+                if not self.eigrp_auto_sum or bad_eigrp_arg:
+                    self.enable_auto_summary = input('\033[93m' + 'ACTION REQUIRED: Please input Y for auto route summary, N otherwise.\n' + '\033[0m')
+                else:
+                    self.enable_auto_summary = self.eigrp_auto_sum
                 if self.enable_auto_summary == 'Y' or self.enable_auto_summary == 'N':
                     break
+                else:
+                    bad_eigrp_arg = True
         ###########################
         
-    def assign_ospf_area_wrapper(self, retries = 200) -> None:
+    def assign_ospf_area_wrapper(self, retries = 100) -> None:
         conns = set()
         for key in self.adj:
             for conn in self.adj[key]:
@@ -108,8 +121,8 @@ class Configurator(object):
                 local_count += len(self.virtual_link_setup[key])
             if local_count < lowest_virtual_links_count:
                 lowest_virtual_links_count = local_count
-                optimized_area_assignment = self.ospf_area
-                optimized_virtual_links_setup = self.virtual_link_setup
+                optimized_area_assignment = copy(self.ospf_area)
+                optimized_virtual_links_setup = copy(self.virtual_link_setup)
             else:
                 self.ospf_area, self.virtual_link_setup = collections.defaultdict(int), collections.defaultdict(set)
         self.ospf_area = optimized_area_assignment

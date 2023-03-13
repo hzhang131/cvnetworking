@@ -48,6 +48,10 @@ def parse():
                         help='Output Directory', default="./")
     parser.add_argument('-nt','--notes', dest="notes", type=str,
                         help='Notes', default="")
+    parser.add_argument('--size', dest='size', type = str, 
+                          default='', help="ospf area size")
+    parser.add_argument('--auto-sum', dest='auto_sum', type = str, 
+                          default='N', help="eigrp auto summarization")
 
     return parser.parse_args()
 
@@ -457,7 +461,7 @@ def __main__():
     outputDir = args.out
     global_outputDir = outputDir
     gns_path = PP_PATH.split("/project-files")[0]
-    configurator = Configurator(f"{gns_path}/{NAME}.gns3", outputDir, {'metadata'})
+    configurator = Configurator(f"{gns_path}/{NAME}.gns3", outputDir, {'metadata'}, args.size, args.auto_sum)
     gns3_server = gns3fy.Gns3Connector(f"http://{HOST}:{PORT}")
 
     # Define the lab you want to load and assign the server connector

@@ -363,6 +363,10 @@ def parse():
                         help='Recognition model path')
     parser.add_argument('--additional',dest="additional", type=str,
                           default="", help="additional arguments")
+    parser.add_argument('--size', dest='size', type = str, 
+                          default='', help="ospf area size")
+    parser.add_argument('--auto-sum', dest='auto_sum', type = str, 
+                          default='N', help="eigrp auto summarization")
 
     return parser.parse_args()
 
@@ -374,6 +378,7 @@ def main():
     name = args.name
     additional = args.additional.split(' ')
     outputDir = args.dir
+    size, auto_sum = args.size, args.auto_sum
 
     mat = args.mat
     list = args.lis
@@ -385,13 +390,13 @@ def main():
       with open(list) as l:
         node_dicts = js.load(l)
       InfotoGNS3.generate_gns3file(name, outputDir, node_dicts, adjacency_matrix)
-      configurator = InfotoGNS3.Configurator(outputDir+"/"+name+".gns3", outputDir, additional)
+      configurator = InfotoGNS3.Configurator(outputDir+"/"+name+".gns3", outputDir, additional, size, auto_sum)
       configurator.configure_vpcs()
       configurator.configure_routers()
       print(f'GNS3 file project id is: {configurator.project_id}')
     elif gns3_file != None:
       # input GNS3 topology file into configurator.
-      configurator = InfotoGNS3.Configurator(gns3_file, outputDir, additional)
+      configurator = InfotoGNS3.Configurator(gns3_file, outputDir, additional, size, auto_sum)
       configurator.configure_vpcs()
       configurator.configure_routers()
       print(f'GNS3 file project id is: {configurator.project_id}')
@@ -412,7 +417,7 @@ def main():
       print(node_dicts)
       print(type(node_dicts[0]))
       InfotoGNS3.generate_gns3file(name, outputDir, node_dicts, adjacency_matrix)
-      configurator = InfotoGNS3.Configurator(outputDir+"/"+name+".gns3", outputDir, additional)
+      configurator = InfotoGNS3.Configurator(outputDir+"/"+name+".gns3", outputDir, additional, size, auto_sum)
       configurator.configure_vpcs()
       configurator.configure_routers()
       print(f'GNS3 file project id is: {configurator.project_id}')
