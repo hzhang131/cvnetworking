@@ -13,6 +13,9 @@ import networkx as nx
 import collections
 from networkx.algorithms.traversal.depth_first_search import dfs_tree
 import itertools
+import os
+import shutil
+import time
 
 BACKBONE = 0
 ROUTER = 0
@@ -348,7 +351,17 @@ def generate_gns3file(name, GNS3dir, nodedicts:dict, adjacency, project_id="0e85
     links = generate_links(nodedicts, adjacency, nodes)
     topology["links"] = links
     topofile_skeleton["topology"] = topology
+    if os.path.exists(f'{GNS3dir}/{name}.gns3'):
+        try:
+            if os.path.isfile(f'{GNS3dir}/{name}.gns3') or os.path.islink(f'{GNS3dir}/{name}.gns3'):
+                os.unlink(f'{GNS3dir}/{name}.gns3')
+            elif os.path.isdir(f'{GNS3dir}/{name}.gns3'):
+                shutil.rmtree(f'{GNS3dir}/{name}.gns3')
+        except Exception as e:
+            print('Failed to delete %s. Reason: %s' % (f'{GNS3dir}/{name}.gns3', e))
+
     with open(f'{GNS3dir}/{name}.gns3', 'w+') as f:
+        print(f'writing {GNS3dir}/{name}.gns3')
         f.write(json.dumps(topofile_skeleton, sort_keys=True, indent=4))
     return
 

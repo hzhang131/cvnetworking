@@ -371,24 +371,28 @@ def parse():
     return parser.parse_args()
 
 
-def main():
-    args = parse()
-    user_img_path = args.img 
-    model_final_path = "./model_final.pth" if not args.model else args.model
-    name = args.name
-    additional = args.additional.split(' ')
-    outputDir = args.dir
-    size, auto_sum = args.size, args.auto_sum
+def main(input_mode=False, user_img_path=None, model_final_path="./model_final.pth", 
+        name = None, additional = None, outputDir = None, size = None, auto_sum = None, 
+        mat = None, list = None, gns3_file=None):
+    if input_mode == False:
+      args = parse()
+      user_img_path = args.img 
+      model_final_path = "./model_final.pth" if not args.model else args.model
+      name = args.name
+      additional = args.additional.split(' ')
+      outputDir = args.dir
+      size, auto_sum = args.size, args.auto_sum
 
-    mat = args.mat
-    list = args.lis
-    gns3_file = args.gns3_file
+      mat = args.mat
+      list = args.lis
+      gns3_file = args.gns3_file
     if mat != None:
       # with open(mat) as m:
       with open(mat) as m:
         adjacency_matrix = np.loadtxt(m)
       with open(list) as l:
         node_dicts = js.load(l)
+      print('code run here first')
       InfotoGNS3.generate_gns3file(name, outputDir, node_dicts, adjacency_matrix)
       configurator = InfotoGNS3.Configurator(outputDir+"/"+name+".gns3", outputDir, additional, size, auto_sum)
       configurator.configure_vpcs()
@@ -396,11 +400,13 @@ def main():
       print(f'GNS3 file project id is: {configurator.project_id}')
     elif gns3_file != None:
       # input GNS3 topology file into configurator.
+      print('code run here second')
       configurator = InfotoGNS3.Configurator(gns3_file, outputDir, additional, size, auto_sum)
       configurator.configure_vpcs()
       configurator.configure_routers()
       print(f'GNS3 file project id is: {configurator.project_id}')
     else:
+      print('code run here third')
       img = cv2.imread(user_img_path)
       scale_percent = int(1080/img.shape[1] * 100)
       width = int(img.shape[1] * scale_percent / 100)

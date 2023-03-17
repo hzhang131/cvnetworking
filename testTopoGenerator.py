@@ -3,7 +3,7 @@ import os
 import argparse
 import random
 
-SET_NUM = 20
+SET_NUM = 10
 
 def generate_node_list(name):
     test_dir = './HugeTest/' + name
