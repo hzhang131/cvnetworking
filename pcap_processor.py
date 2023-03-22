@@ -93,9 +93,7 @@ def pcap_processor(path, mode):
     time_delta = list(map(lambda x: x[1] - x[0], time_intervals))
     if not time_delta:
         print(f'No change in routing graph, or discontiguous graphs formed! Retrying...')
-        return NO_ROUTING_GRAPH_CHANGE
+        return NO_ROUTING_GRAPH_CHANGE, None
     else:
         print(f'network takes at most {max(time_delta)} seconds to converge')
-        return ROUTING_GRAPH_CHANGE 
-
-   
+        return ROUTING_GRAPH_CHANGE, max(time_delta)

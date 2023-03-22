@@ -21,7 +21,7 @@ from pcap_processor import pcap_processor
 import subprocess
 from ImagetoGNS3 import main as ImagetoGNS3Main
 
-drop_num = 2
+drop_num = 4
 
 def parse():
     """
@@ -141,7 +141,7 @@ def capture_links(configurator, lab, host, port, capture_dir):
         r = requests.post(addr, data={})
         # print("==============================================")
         # print(f"starting link between {configurator.node_dict[link.nodes[0]['node_id']][0]}, {configurator.node_dict[link.nodes[1]['node_id']][0]} returns status code {r}")
-    time.sleep(120)
+    time.sleep(60)
     for link in lab.links:
         addr = f'http://{host}:{port}/v2/projects/{link.project_id}/links/{link.link_id}/stop_capture'
         r = requests.post(addr, data={})
@@ -195,50 +195,55 @@ def drop_link_test(ip_assignment, HOST, PORT, OUT, PP_PATH, NAME, SIZE, AUTO_SUM
     print("start captures!")
     capture_links(configurator, lab, HOST, PORT, PP_PATH + '/captures')
 
-    status = pcap_processor(PP_PATH + '/captures/', MODE)
-    return status
+    status, max_delta = pcap_processor(PP_PATH + '/captures/', MODE)
+    return status, max_delta
 
 
-def __main__():
-    args = parse()
-    HOST = args.host
-    global_host = HOST
-    PORT = args.port
-    global_port = PORT
-    NAME = args.name
-    global_name = NAME
-    PP_PATH = args.pp_path
-    global_pp_path = PP_PATH
-    NOTES = args.notes
-    global_notes = NOTES
-    ip_set, ip_assignment = process_project_files(PP_PATH)
-    global_ip_set, global_ip_assignment = ip_set, ip_assignment
-    ADD = args.additional
-    global_add = ADD
-    SIZE = args.size
-    MODE = args.mode
-    AUTO_SUM = args.auto_sum 
-    OUT = args.out
+def main(manual=False, HOST='localhost', PORT='3080', NAME=None, PP_PATH=None, NOTES=None, ADD=None, SIZE=None, MODE=None, AUTO_SUM=None, OUT=None):
+    if not manual:
+        args = parse()
+        HOST = args.host
+        global_host = HOST
+        PORT = args.port
+        global_port = PORT
+        NAME = args.name
+        global_name = NAME
+        PP_PATH = args.pp_path
+        global_pp_path = PP_PATH
+        NOTES = args.notes
+        global_notes = NOTES
+        ip_set, ip_assignment = None, None
+        ADD = args.additional
+        global_add = ADD
+        SIZE = args.size
+        MODE = args.mode
+        AUTO_SUM = args.auto_sum 
+        OUT = args.out
     
-
     mat_path = f'./HugeTest/{NAME}/{NAME}.txt'
     lis_path = f'./HugeTest/{NAME}/{NAME}.json'
+    max_delta = None
     status = 0
     while status == 0:
         project_id = ImagetoGNS3Main(input_mode=True, 
         name = NAME, additional = MODE, outputDir = OUT, size = SIZE, auto_sum = AUTO_SUM, 
         mat = mat_path, list = lis_path)
         print(project_id)
+        ip_set, ip_assignment = process_project_files(PP_PATH)
         # open up gns3 from here.
         print(f'{OUT}{NAME}.gns3')
         proc1 = subprocess.Popen(['gns3', f'{OUT}{NAME}.gns3'])
         # Wait for a minute for GNS3 gui to boot up
         time.sleep(20)
-        
-        status = drop_link_test(ip_assignment, HOST, PORT, OUT, PP_PATH, NAME, SIZE, AUTO_SUM, MODE)
+        try:
+            status, max_delta = drop_link_test(ip_assignment, HOST, PORT, OUT, PP_PATH, NAME, SIZE, AUTO_SUM, MODE)
+        except:
+            proc1.kill()
+            raise Exception('Something bad happened, skip')
         time.sleep(3)
         proc1.kill()
     
     print("Process completed!")
+    return max_delta
 
-__main__()
+# main()
